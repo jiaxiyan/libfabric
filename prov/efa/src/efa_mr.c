@@ -494,11 +494,6 @@ static struct ibv_mr *efa_mr_reg_ibv_mr(struct efa_mr *efa_mr, struct fi_mr_attr
 	assert(efa_mr->domain->hmem_info[mr_attr->iface].p2p_supported_by_device);
 
 	if (flags & FI_MR_DMABUF) {
-		if (OFI_UNLIKELY(!efa_mr->domain->hmem_info[mr_attr->iface].dmabuf_supported)) {
-			EFA_WARN(FI_LOG_MR, "Requested FI_MR_DMABUF, but dmabuf is not supported.\n");
-			return NULL;
-		}
-
 		EFA_INFO(FI_LOG_MR, "FI_MR_DMABUF is set. Registering dmabuf mr with fd: %d, offset: %lu, len: %zu\n", 
 			mr_attr->dmabuf->fd, mr_attr->dmabuf->offset, mr_attr->dmabuf->len);
 		return efa_mr_reg_ibv_dmabuf_mr(
@@ -511,23 +506,23 @@ static struct ibv_mr *efa_mr_reg_ibv_mr(struct efa_mr *efa_mr, struct fi_mr_attr
 		);
 	}
 
-	if (efa_mr->domain->hmem_info[mr_attr->iface].dmabuf_supported) {
+	if (efa_mr_is_hmem(efa_mr)) {
 		ret = ofi_hmem_get_dmabuf_fd(
 			mr_attr->iface,
 			mr_attr->mr_iov->iov_base,
 			(uint64_t) mr_attr->mr_iov->iov_len,
 			&dmabuf_fd, &offset);
-		if (ret != FI_SUCCESS) {
+		if (ret == FI_SUCCESS) {
+			EFA_INFO(FI_LOG_MR, "Registering dmabuf mr with fd: %d, offset: %lu, len: %zu\n", 
+				dmabuf_fd, offset, mr_attr->mr_iov->iov_len);
+			return efa_mr_reg_ibv_dmabuf_mr(efa_mr->domain->ibv_pd, offset,
+						mr_attr->mr_iov->iov_len,
+						(uint64_t)mr_attr->mr_iov->iov_base,
+						dmabuf_fd, access);
+		} else {
 			EFA_WARN(FI_LOG_MR, "Unable to get dmabuf fd for device buffer. errno: %d, err_msg: %s\n",
 				ret, fi_strerror(-ret));
-			return NULL;
 		}
-		EFA_INFO(FI_LOG_MR, "Registering dmabuf mr with fd: %d, offset: %lu, len: %zu\n", 
-			dmabuf_fd, offset, mr_attr->mr_iov->iov_len);
-		return efa_mr_reg_ibv_dmabuf_mr(efa_mr->domain->ibv_pd, offset,
-					mr_attr->mr_iov->iov_len,
-					(uint64_t)mr_attr->mr_iov->iov_base,
-					dmabuf_fd, access);
 	}
 
 	EFA_INFO(FI_LOG_MR, "Dmabuf is not supported. Registering memory via ibv_reg_mr with addr: %lu, len: %zu\n",
