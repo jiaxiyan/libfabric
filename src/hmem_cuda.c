@@ -442,7 +442,9 @@ int cuda_get_base_addr(const void *ptr, size_t len, void **base, size_t *size)
 	CUresult cu_result;
 	const char *cu_error_name;
 	const char *cu_error_str;
-
+	FI_INFO(&core_prov, FI_LOG_CORE,
+		"Perform cuMemGetAddressRange with addr: %lu, len: %zu\n",
+		(uint64_t)ptr, len);
 	cu_result = ofi_cuMemGetAddressRange((CUdeviceptr *)base,
 					      size, (CUdeviceptr) ptr);
 	if (cu_result == CUDA_SUCCESS)
@@ -451,8 +453,8 @@ int cuda_get_base_addr(const void *ptr, size_t len, void **base, size_t *size)
 	ofi_cuGetErrorName(cu_result, &cu_error_name);
 	ofi_cuGetErrorString(cu_result, &cu_error_str);
 	FI_WARN(&core_prov, FI_LOG_CORE,
-		"Failed to perform cuMemGetAddressRange: %s:%s\n",
-		cu_error_name, cu_error_str);
+		"Failed to perform cuMemGetAddressRange: error code = %d, error name = %s, error string = %s\n",
+		cu_result, cu_error_name, cu_error_str);
 	return -FI_EIO;
 }
 
