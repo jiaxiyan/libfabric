@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-only */
 /* SPDX-FileCopyrightText: Copyright Amazon.com, Inc. or its affiliates. All rights reserved. */
 
+#include "efa_rdm_pke_utils.h"
 #include "efa_unit_tests.h"
 #include "rdm/efa_rdm_cq.h"
 
@@ -309,7 +310,62 @@ void test_efa_rdm_ep_pkt_pool_page_alignment(struct efa_resource **state)
 
 	fi_close(&ep->fid);
 }
+/**
+ * @brief When ep->sendrecv_in_order_aligned_128_bytes = 1,
+ * test if the packet allocated from read_copy_pkt_pool is 128 byte aligned.
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_rdm_read_copy_pkt_pool_128_alignment(struct efa_resource **state)
+{
+	int ret;
+	struct efa_rdm_pke *pkt_entry;
+	struct fid_ep *ep;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_resource *resource = *state;
 
+	efa_unit_test_resource_construct(resource, FI_EP_RDM);
+
+	ret = fi_endpoint(resource->domain, resource->info, &ep, NULL);
+	assert_int_equal(ret, 0);
+	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+	efa_rdm_ep->sendrecv_in_order_aligned_128_bytes = 1;
+
+	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->rx_readcopy_pkt_pool, EFA_RDM_PKE_FROM_READ_COPY_POOL);
+	assert_non_null(pkt_entry);
+	assert(ofi_is_addr_aligned((void *)pkt_entry->wiredata, EFA_RDM_IN_ORDER_ALIGNMENT));
+	efa_rdm_pke_release_rx(pkt_entry);
+
+	fi_close(&ep->fid);
+}
+
+/**
+ * @brief verify that when ep->sendrecv_in_order_aligned_128_bytes = 1, the copy method is local read. 
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_rdm_pke_get_available_copy_methods(struct efa_resource **state)
+{
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_mr desc;
+	struct efa_resource *resource = *state;
+	bool local_read_available, gdrcopy_available, cuda_memcpy_available;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM);
+	desc.peer.iface = FI_HMEM_CUDA;
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+	efa_rdm_ep->sendrecv_in_order_aligned_128_bytes = 1;
+
+	efa_rdm_ep_domain(efa_rdm_ep)->hmem_info[FI_HMEM_CUDA].p2p_supported_by_device = true;
+	efa_rdm_ep->hmem_p2p_opt = FI_HMEM_P2P_ENABLED;
+
+	int ret = efa_rdm_pke_get_available_copy_methods(efa_rdm_ep, &desc, &local_read_available, &cuda_memcpy_available, &gdrcopy_available);
+	assert_int_equal(ret, 0);
+	assert_true(local_read_available);
+	assert_false(cuda_memcpy_available);
+	assert_false(gdrcopy_available);
+}
 
 /**
  * @brief when delivery complete atomic was used and handshake packet has not been received
