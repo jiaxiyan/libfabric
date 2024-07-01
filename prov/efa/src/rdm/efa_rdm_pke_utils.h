@@ -70,4 +70,10 @@ ssize_t efa_rdm_pke_copy_payload_to_ope(struct efa_rdm_pke *pke,
 
 uint32_t *efa_rdm_pke_connid_ptr(struct efa_rdm_pke *pkt_entry);
 
+int efa_rdm_pke_get_available_copy_methods(struct efa_rdm_ep *ep,
+					   struct efa_mr *desc,
+					   bool *local_read_available,
+					   bool *cuda_memcpy_available,
+					   bool *gdrcopy_available);
+
 #endif
