@@ -241,7 +241,7 @@ int ft_cuda_init(void)
 
 #if HAVE_CUDA_DMABUF
 	cuda_ops.cuMemGetHandleForAddressRange = dlsym(cuda_handle,
-						       STRINGIFY(cuMemGetHandleForAddressRange));
+						       STRINGIFY(cuMemGetHandleForAddressRange_v2));
 	if (!cuda_ops.cuMemGetHandleForAddressRange) {
 		FT_ERR("Failed to find cuMemGetHandleForAddressRange\n");
 		goto err_dlclose_cuda;
@@ -262,7 +262,7 @@ int ft_cuda_init(void)
 	}
 
 	cuda_ops.cuMemGetAddressRange = dlsym(cuda_handle,
-				     STRINGIFY(cuMemGetAddressRange));
+				     STRINGIFY(cuMemGetAddressRange_v2));
 	if (!cuda_ops.cuMemGetAddressRange) {
 		FT_ERR("Failed to find cuMemGetAddressRange\n");
 		goto err_dlclose_cuda;

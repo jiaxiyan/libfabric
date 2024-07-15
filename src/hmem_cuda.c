@@ -68,7 +68,7 @@
 	_(cuPointerGetAttributes)	\
 	_(cuPointerSetAttribute)	\
 	_(cuDeviceCanAccessPeer)	\
-	_(cuMemGetAddressRange)		\
+	_(cuMemGetAddressRange_v2)		\
 	_(cuDeviceGetAttribute)		\
 	_(cuDeviceGet)			\
 	CUDA_DRIVER_DMABUF_FUNCS_DEF(_)
