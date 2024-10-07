@@ -360,6 +360,7 @@ ssize_t efa_rdm_pke_sendv(struct efa_rdm_pke **pkt_entry_vec,
 	struct efa_rdm_ep *ep;
 	struct efa_rdm_pke *pkt_entry;
 	struct efa_rdm_peer *peer;
+	enum fi_hmem_iface iface;
 	struct ibv_sge sg_list[2];  /* efa device support up to 2 iov */
 	struct ibv_data_buf inline_data_list[2];
 	int ret = 0, pkt_idx, iov_cnt;
@@ -417,6 +418,19 @@ ssize_t efa_rdm_pke_sendv(struct efa_rdm_pke **pkt_entry_vec,
 				sg_list[1].addr = (uintptr_t)pkt_entry->payload;
 				sg_list[1].length = pkt_entry->payload_size;
 				sg_list[1].lkey = ((struct efa_mr *)pkt_entry->payload_mr)->ibv_mr->lkey;
+				if (pkt_entry->payload_mr) {
+					iface = ((struct efa_mr *) pkt_entry->payload_mr)->peer.iface;
+					EFA_WARN(FI_LOG_EP_CTRL,
+							"wr_id = %ld, payload_mr = %p,"
+							"send buffer iface = %s, ope total_len = %ld, "
+							"sg_list[0].addr=%p, sg_list[0].length=%d,"
+							"sg_list[1].addr = %p, sg_list[1].length = %d\n",
+							(uintptr_t)pkt_entry, (struct efa_mr *) pkt_entry->payload_mr,
+							fi_tostr(&iface, FI_TYPE_HMEM_IFACE),
+							pkt_entry->ope->total_len,
+							sg_list[0].addr, sg_list[0].length,
+							sg_list[1].addr, sg_list[1].length);
+				}
 			}
 
 			ibv_wr_set_sge_list(ep->base_ep.qp->ibv_qp_ex, iov_cnt, sg_list);
