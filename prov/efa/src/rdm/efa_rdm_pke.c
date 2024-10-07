@@ -360,6 +360,7 @@ ssize_t efa_rdm_pke_sendv(struct efa_rdm_pke **pkt_entry_vec,
 	struct efa_rdm_ep *ep;
 	struct efa_rdm_pke *pkt_entry;
 	struct efa_rdm_peer *peer;
+	enum fi_hmem_iface iface;
 	struct ibv_sge sg_list[2];  /* efa device support up to 2 iov */
 	struct ibv_data_buf inline_data_list[2];
 	int ret = 0, pkt_idx, iov_cnt;
@@ -404,6 +405,15 @@ ssize_t efa_rdm_pke_sendv(struct efa_rdm_pke **pkt_entry_vec,
 				iov_cnt = 2;
 				inline_data_list[1].addr = pkt_entry->payload;
 				inline_data_list[1].length = pkt_entry->payload_size;
+				if (pkt_entry->payload_mr) {
+					iface = ((struct efa_mr *) pkt_entry->payload_mr)->peer.iface;
+					EFA_WARN(FI_LOG_EP_CTRL,
+						"send buffer iface = %s, ope total_len = %ld, "
+						"inline data pkt_size = %ld, payload_size = %ld\n",
+						fi_tostr(&iface, FI_TYPE_HMEM_IFACE),
+						pkt_entry->ope->total_len, pkt_entry->pkt_size,
+						pkt_entry->payload_size);
+				}
 			}
 
 			ibv_wr_set_inline_data_list(qp->ibv_qp_ex, iov_cnt, inline_data_list);
@@ -417,6 +427,15 @@ ssize_t efa_rdm_pke_sendv(struct efa_rdm_pke **pkt_entry_vec,
 				sg_list[1].addr = (uintptr_t)pkt_entry->payload;
 				sg_list[1].length = pkt_entry->payload_size;
 				sg_list[1].lkey = ((struct efa_mr *)pkt_entry->payload_mr)->ibv_mr->lkey;
+				if (pkt_entry->payload_mr) {
+					iface = ((struct efa_mr *) pkt_entry->payload_mr)->peer.iface;
+					EFA_WARN(FI_LOG_EP_CTRL,
+							"send buffer iface = %s, ope total_len = %ld, "
+							"sg_list pkt_size = %ld, payload_size = %ld\n",
+							fi_tostr(&iface, FI_TYPE_HMEM_IFACE),
+							pkt_entry->ope->total_len, pkt_entry->pkt_size,
+							pkt_entry->payload_size);
+				}
 			}
 
 			ibv_wr_set_sge_list(ep->base_ep.qp->ibv_qp_ex, iov_cnt, sg_list);
@@ -492,6 +511,11 @@ int efa_rdm_pke_read(struct efa_rdm_pke *pkt_entry,
 	qp = ep->base_ep.qp;
 	ibv_wr_start(qp->ibv_qp_ex);
 	qp->ibv_qp_ex->wr_id = (uintptr_t)pkt_entry;
+
+	EFA_WARN(FI_LOG_EP_CTRL,
+		 "Posting read, ope total_len = %ld, sge length = %ld\n",
+		 txe->total_len, len);
+
 	ibv_wr_rdma_read(qp->ibv_qp_ex, remote_key, remote_buf);
 
 	sge.addr = (uint64_t)local_buf;
