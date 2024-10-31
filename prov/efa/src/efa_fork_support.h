@@ -17,7 +17,7 @@ enum efa_fork_support_status {
 };
 extern enum efa_fork_support_status g_efa_fork_status;
 
-int efa_fork_support_enable_if_requested(struct fid_domain *domain_fid);
+int efa_fork_support_enable_if_requested();
 
 void efa_fork_support_request_initialize();
 
