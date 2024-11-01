@@ -82,6 +82,10 @@ static int efa_fork_support_is_enabled()
 #if HAVE_IBV_IS_FORK_INITIALIZED == 1
 	enum ibv_fork_status fork_status = ibv_is_fork_initialized();
 
+	EFA_WARN(FI_LOG_CORE,
+		 "HAVE_IBV_IS_FORK_INITIALIZED, ibv_is_fork_initialized "
+		 "returns %d\n",
+		 fork_status);
 	/* If fork support is ENABLED or UNNEEDED, return 1. */
 	return fork_status != IBV_FORK_DISABLED;
 #else
@@ -125,6 +129,9 @@ out:
 			"efa_fork_support_is_enabled(): %s\n",strerror(ret));
 		return -FI_EINVAL;
 	}
+	EFA_WARN(FI_LOG_CORE,
+		"ibv_fork_init returns %d\n",
+		ret_init);
 	if (ret_init == 0) return 1;
 	if (ret_init == EINVAL) return 0;
 	EFA_WARN(FI_LOG_CORE,
@@ -247,9 +254,11 @@ int efa_fork_support_enable_if_requested()
 	if (ret < 0) return ret;
 	is_enabled = ret;
 
+	EFA_WARN(FI_LOG_CORE, "efa_fork_support_is_enabled = %d \n", is_enabled);
 	if (g_efa_fork_status == EFA_FORK_SUPPORT_OFF && is_enabled)
 		g_efa_fork_status = EFA_FORK_SUPPORT_ON;
 
+	EFA_WARN(FI_LOG_CORE, "g_efa_fork_status = %d \n", g_efa_fork_status);
 	if (g_efa_fork_status == EFA_FORK_SUPPORT_ON && getenv("RDMAV_HUGEPAGES_SAFE")) {
 			EFA_WARN(FI_LOG_CORE,
 				 "Using libibverbs fork support and huge pages is not"
