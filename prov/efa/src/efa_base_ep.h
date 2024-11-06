@@ -50,11 +50,8 @@ struct efa_base_ep {
 	bool efa_qp_enabled;
 	bool is_wr_started;
 
-	struct ibv_send_wr xmit_more_wr_head;
-	struct ibv_send_wr *xmit_more_wr_tail;
-	struct ibv_recv_wr recv_more_wr_head;
-	struct ibv_recv_wr *recv_more_wr_tail;
 	struct efa_recv_wr *efa_recv_wr_vec;
+	size_t efa_recv_wr_index;
 
 	/* Only used by RDM ep type */
 	struct efa_qp *user_recv_qp; /* Separate qp to receive pkts posted by users */
