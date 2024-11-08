@@ -21,9 +21,7 @@ def test_dgram_pingpong(cmdline_args, iteration_type):
     server_rx_bytes_before_test = efa_retrieve_hw_counter_value(cmdline_args.client_id, "rx_bytes")
     client_rx_bytes_before_test = efa_retrieve_hw_counter_value(cmdline_args.client_id, "rx_bytes")
 
-    # efa's dgram endpoint requires prefix therefore must always test with prefix mode on
-    test = ClientServerTest(cmdline_args_copy, "fi_dgram_pingpong", iteration_type,
-                            prefix_type="with_prefix")
+    test = ClientServerTest(cmdline_args_copy, "fi_dgram_pingpong", iteration_type)
     test.run()
 
     server_tx_bytes_after_test = efa_retrieve_hw_counter_value(cmdline_args.client_id, "tx_bytes")

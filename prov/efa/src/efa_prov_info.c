@@ -167,10 +167,6 @@ void efa_prov_info_set_ep_attr(struct fi_info *prov_info,
 {
 
 	*prov_info->ep_attr = efa_ep_attr;
-	if (ep_type == FI_EP_DGRAM) {
-		prov_info->mode |= FI_MSG_PREFIX;
-		prov_info->ep_attr->msg_prefix_size = 40;
-	}
 
 	prov_info->ep_attr->protocol	= FI_PROTO_EFA;
 	prov_info->ep_attr->type	= ep_type;
@@ -196,7 +192,7 @@ void efa_prov_info_set_ep_attr(struct fi_info *prov_info,
  */
 const struct fi_tx_attr efa_dgrm_tx_attr = {
 	.caps			= EFA_DGRM_TX_CAPS,
-	.mode			= FI_MSG_PREFIX,
+	.mode			= 0,
 	.op_flags		= EFA_TX_OP_FLAGS,
 	.msg_order		= EFA_MSG_ORDER,
 	.inject_size		= 0,
@@ -208,7 +204,7 @@ const struct fi_tx_attr efa_dgrm_tx_attr = {
  */
 const struct fi_rx_attr efa_dgrm_rx_attr = {
 	.caps			= EFA_DGRM_RX_CAPS,
-	.mode			= FI_MSG_PREFIX | EFA_RX_MODE,
+	.mode			= EFA_RX_MODE,
 	.op_flags		= EFA_RX_DGRM_OP_FLAGS,
 	.msg_order		= EFA_MSG_ORDER,
 	.iov_limit		= 1

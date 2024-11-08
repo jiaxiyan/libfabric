@@ -29,12 +29,10 @@ def test_efa_device_selection(cmdline_args):
             server_tx_bytes_before_test = efa_retrieve_hw_counter_value(cmdline_args.server_id, "tx_bytes", server_device_name)
             client_tx_bytes_before_test = efa_retrieve_hw_counter_value(cmdline_args.client_id, "tx_bytes", client_device_name)
 
-            prefix_type = "wout_prefix"
             strict_fabtests_mode = True
             if suffix == "rdm":
                 command = "fi_rdm_pingpong"
             else:
-                prefix_type = "with_prefix"  # efa provider requires prefix mode for dgram provider, hence "-k"
                 strict_fabtests_mode = False  # # dgram is unreliable
                 command = "fi_dgram_pingpong"
 
@@ -46,7 +44,7 @@ def test_efa_device_selection(cmdline_args):
             cmdline_args_copy.additional_client_arguments = "-d " + client_domain_name
             cmdline_args_copy.strict_fabtests_mode = strict_fabtests_mode
 
-            test = ClientServerTest(cmdline_args_copy, command, message_size="1000", prefix_type=prefix_type, timeout=300)
+            test = ClientServerTest(cmdline_args_copy, command, message_size="1000", timeout=300)
             test.run()
 
             server_tx_bytes_after_test = efa_retrieve_hw_counter_value(cmdline_args.server_id, "tx_bytes", server_device_name)
