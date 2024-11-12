@@ -94,6 +94,15 @@ static inline ssize_t efa_post_recv(struct efa_base_ep *base_ep, const struct fi
 	if (wr_index > 0)
 		base_ep->efa_recv_wr_vec[wr_index - 1].wr.next = &base_ep->efa_recv_wr_vec[wr_index].wr;
 
+	EFA_WARN(FI_LOG_EP_CTRL,
+				"wr_id = %ld, iov_count = %d, ibv_mr = %p, "
+				"sg_list[0].addr=%p, sg_list[0].length=%d. "
+				"wr_index = %d \n",
+				base_ep->efa_recv_wr_vec[wr_index].wr.wr_id,base_ep->efa_recv_wr_vec[wr_index].wr.num_sge, 
+				((struct efa_mr *)msg->desc[0])->ibv_mr,
+				base_ep->efa_recv_wr_vec[wr_index].wr.sg_list[0].addr, base_ep->efa_recv_wr_vec[wr_index].wr.sg_list[0].length,
+				wr_index);
+
 	base_ep->efa_recv_wr_index++;
 
 	if (flags & FI_MORE)
@@ -181,6 +190,16 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 			inline_data_list[i].addr = msg->msg_iov[i].iov_base;
 			inline_data_list[i].length = msg->msg_iov[i].iov_len;
 		}
+		EFA_WARN(FI_LOG_EP_CTRL,
+				"wr_id = %ld,"
+				"msg->desc[0] = %p, total_len = %ld, "
+				"inline_data_list[0].addr=%p, inline_data_list[0].length=%d,"
+				"inline_data_list[1].addr = %p, inline_data_list[1].length = %d\n",
+				(uintptr_t)msg->context,
+				msg->desc[0],
+				len,
+				inline_data_list[0].addr, inline_data_list[0].length,
+				inline_data_list[1].addr, inline_data_list[1].length);
 		ibv_wr_set_inline_data_list(qp->ibv_qp_ex, msg->iov_count, inline_data_list);
 	} else {
 		for (i = 0; i < msg->iov_count; i++) {
@@ -190,6 +209,13 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 			assert (msg->desc && msg->desc[i]);
 			sg_list[i].lkey = ((struct efa_mr *)msg->desc[i])->ibv_mr->lkey;
 		}
+		EFA_WARN(FI_LOG_EP_CTRL,
+				"wr_id = %ld, iov_count = %d, ibv_mr[0] = %p, "
+				"total_len = %ld, "
+				"sg_list[0].addr=%ld, sg_list[0].length=%d,\n",
+				(uintptr_t)msg->context, msg->iov_count, ((struct efa_mr *)msg->desc[0])->ibv_mr,
+				len,
+				sg_list[0].addr, sg_list[0].length);
 		ibv_wr_set_sge_list(qp->ibv_qp_ex, msg->iov_count, sg_list);
 	}
 

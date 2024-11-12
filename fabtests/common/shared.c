@@ -2561,6 +2561,10 @@ ssize_t ft_post_rx_buf(struct fid_ep *ep, size_t size, void *ctx,
 			"receive", ep, op_buf, size, op_mr_desc,
 			remote_fi_addr, op_tag, 0, ctx);
 	} else {
+		printf("ft_post_rx_buf() wr_id = %ld, iov_count = %d, ibv_mr = %p, "
+				"sg_list[0].addr=%p, sg_list[0].length=%ld,\n",
+				(uintptr_t)ctx, 1, op_mr_desc,
+				op_buf, size);
 		FT_POST(fi_recv, ft_progress, rxcq, rx_seq, &rx_cq_cntr,
 			"receive", ep, op_buf, size, op_mr_desc, remote_fi_addr, ctx);
 	}

@@ -61,7 +61,8 @@ ssize_t efa_dgram_cq_readerr(struct fid_cq *cq_fid, struct fi_cq_err_entry *entr
 	entry->flags = efa_dgram_cq_opcode_to_fi_flags(ibv_wc_read_opcode(cq->ibv_cq_ex));
 	entry->err = FI_EIO;
 	entry->prov_errno = ibv_wc_read_vendor_err(cq->ibv_cq_ex);
-	EFA_WARN(FI_LOG_CQ, "Work completion status: %s\n", efa_strerror(entry->prov_errno));
+	if (ibv_wc_read_opcode(cq->ibv_cq_ex) == IBV_WC_RECV)
+		EFA_WARN(FI_LOG_CQ, "IBV_WC_RECV failed,wr_id = %ld, Work completion status: %s\n", (uintptr_t)cq->ibv_cq_ex->wr_id, efa_strerror(entry->prov_errno));
 
 	ofi_spin_unlock(&cq->lock);
 
