@@ -295,7 +295,7 @@ void efa_cq_poll_ibv_cq(ssize_t cqe_to_process, struct util_cq *util_cq)
 {
 	bool should_end_poll = false;
 	struct efa_base_ep *base_ep;
-	struct efa_cq *cq;
+	// struct efa_cq *cq;
 	struct efa_domain *efa_domain;
 	struct fi_cq_tagged_entry cq_entry = {0};
 	struct fi_cq_err_entry err_entry;
@@ -308,8 +308,9 @@ void efa_cq_poll_ibv_cq(ssize_t cqe_to_process, struct util_cq *util_cq)
 	 */
 	struct ibv_poll_cq_attr poll_cq_attr = {.comp_mask = 0};
 
-	cq = container_of(util_cq, struct efa_cq, util_cq);
-	efa_domain = container_of(cq->util_cq.domain, struct efa_domain, util_domain);
+	// cq = container_of(util_cq, struct efa_cq, util_cq);
+	// efa_domain = container_of(cq->util_cq.domain, struct efa_domain, util_domain);
+	struct efa_rdm_cq *cq = container_of(util_cq, struct efa_rdm_cq, util_cq);
 
 	/* Call ibv_start_poll only once */
 	err = ibv_start_poll(cq->ibv_cq.ibv_cq_ex, &poll_cq_attr);
@@ -353,7 +354,7 @@ void efa_cq_poll_ibv_cq(ssize_t cqe_to_process, struct util_cq *util_cq)
 			break;
 		}
 
-		cq->read_entry(cq->ibv_cq.ibv_cq_ex, &cq_entry);
+		efa_cq_read_tagged_entry(cq->ibv_cq.ibv_cq_ex, &cq_entry);
 
 		switch (opcode) {
 		case IBV_WC_SEND: /* fall through */
@@ -497,24 +498,24 @@ int efa_cq_open(struct fid_domain *domain_fid, struct fi_cq_attr *attr,
 		goto err_free_util_cq;
 	}
 
-	switch (attr->format) {
-	case FI_CQ_FORMAT_UNSPEC:
-	case FI_CQ_FORMAT_MSG:
-		cq->read_entry = efa_cq_read_msg_entry;
-		break;
-	case FI_CQ_FORMAT_CONTEXT:
-		cq->read_entry = efa_cq_read_context_entry;
-		break;
-	case FI_CQ_FORMAT_DATA:
-		cq->read_entry = efa_cq_read_data_entry;
-		break;
-	case FI_CQ_FORMAT_TAGGED:
-		cq->read_entry = efa_cq_read_tagged_entry;
-		break;
-	default:
-		err = -FI_ENOSYS;
-		goto err_free_util_cq;
-	}
+	// switch (attr->format) {
+	// case FI_CQ_FORMAT_UNSPEC:
+	// case FI_CQ_FORMAT_MSG:
+	// 	cq->read_entry = efa_cq_read_msg_entry;
+	// 	break;
+	// case FI_CQ_FORMAT_CONTEXT:
+	// 	cq->read_entry = efa_cq_read_context_entry;
+	// 	break;
+	// case FI_CQ_FORMAT_DATA:
+	// 	cq->read_entry = efa_cq_read_data_entry;
+	// 	break;
+	// case FI_CQ_FORMAT_TAGGED:
+	// 	cq->read_entry = efa_cq_read_tagged_entry;
+	// 	break;
+	// default:
+	// 	err = -FI_ENOSYS;
+	// 	goto err_free_util_cq;
+	// }
 
 	*cq_fid = &cq->util_cq.cq_fid;
 	(*cq_fid)->fid.fclass = FI_CLASS_CQ;

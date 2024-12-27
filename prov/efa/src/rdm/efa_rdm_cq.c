@@ -672,7 +672,7 @@ int efa_rdm_cq_open(struct fid_domain *domain, struct fi_cq_attr *attr,
 	dlist_init(&cq->ibv_cq_poll_list);
 	cq->need_to_scan_ep_list = false;
 	ret = ofi_cq_init(&efa_prov, domain, attr, &cq->util_cq,
-			  &efa_rdm_cq_progress, context);
+			  &efa_cq_progress, context);
 
 	if (ret)
 		goto free;

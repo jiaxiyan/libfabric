@@ -1023,3 +1023,5 @@ void test_efa_cq_read_recv_failure(struct efa_resource **state)
 
 	efa_unit_test_buff_destruct(&recv_buff);
 }
+
+//TODO test rdma/read/write with overriding rdm
