@@ -40,6 +40,7 @@ struct efa_env efa_env = {
 	.huge_page_setting = EFA_ENV_HUGE_PAGE_UNSPEC,
 	.use_unsolicited_write_recv = 1,
 	.internal_rx_refill_threshold = 8,
+	.use_efa_direct = 0,
 };
 
 /**
@@ -155,6 +156,7 @@ void efa_env_param_get(void)
 			    &efa_env.efa_max_gdrcopy_msg_size);
 	fi_param_get_bool(&efa_prov, "use_sm2", &efa_env.use_sm2);
 	fi_param_get_bool(&efa_prov, "use_unsolicited_write_recv", &efa_env.use_unsolicited_write_recv);
+	fi_param_get_bool(&efa_prov, "use_efa_direct", &efa_env.use_efa_direct);
 
 	int use_huge_page;
 	if (fi_param_get_bool(&efa_prov, "use_huge_page", &use_huge_page) ==0) {
@@ -236,6 +238,8 @@ void efa_env_define()
 			"Use device's unsolicited write recv functionality when it's available. (Default: true)");
 	fi_param_define(&efa_prov, "internal_rx_refill_threshold", FI_PARAM_SIZE_T,
 			"The threshold that EFA provider will refill the internal rx pkt pool. (Default: %zu)", efa_env.internal_rx_refill_threshold);
+	fi_param_define(&efa_prov, "use_efa_direct", FI_PARAM_BOOL,
+			"Use efa direct path. (Default: false)");
 }
 
 

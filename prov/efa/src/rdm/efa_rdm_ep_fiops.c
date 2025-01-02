@@ -14,6 +14,9 @@
 #include "efa_rdm_pke_req.h"
 #include "efa_cntr.h"
 
+extern struct fi_ops_msg efa_msg_ops;
+extern struct fi_ops_rma efa_rma_ops;
+
 static
 void efa_rdm_ep_construct_ibv_qp_init_attr_ex(struct efa_rdm_ep *ep,
 					struct ibv_qp_init_attr_ex *attr_ex,
@@ -1288,6 +1291,7 @@ static int efa_rdm_ep_ctrl(struct fid *fid, int command, void *arg)
 	struct fi_peer_srx_context peer_srx_context = {0};
 	struct fi_rx_attr peer_srx_attr = {0};
 	struct util_srx_ctx *srx_ctx;
+	struct fid_ep *ep_fid;
 
 	switch (command) {
 	case FI_ENABLE:
@@ -1318,6 +1322,13 @@ static int efa_rdm_ep_ctrl(struct fid *fid, int command, void *arg)
 			ep->base_ep.inject_rma_size =
 				MIN(ep->base_ep.inject_rma_size,
 				    efa_rdm_ep_domain(ep)->device->efa_attr.inline_buf_size);
+		}
+
+		if (efa_env.use_efa_direct) {
+			ep_fid = &ep->base_ep.util_ep.ep_fid;
+			ep_fid->msg = &efa_msg_ops;
+			ep_fid->rma = &efa_rma_ops;
+			ep->base_ep.inject_rma_size = 0;
 		}
 
 		ret = efa_rdm_ep_create_base_ep_ibv_qp(ep);

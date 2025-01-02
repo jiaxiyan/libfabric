@@ -687,6 +687,9 @@ int efa_rdm_cq_open(struct fid_domain *domain, struct fi_cq_attr *attr,
 	(*cq_fid)->fid.ops = &efa_rdm_cq_fi_ops;
 	(*cq_fid)->ops = &efa_rdm_cq_ops;
 
+	if (efa_env.use_efa_direct)
+		cq->util_cq.progress = efa_cq_progress;
+
 	/* open shm cq as peer cq */
 	if (efa_domain->shm_domain) {
 		memcpy(&shm_cq_attr, attr, sizeof(*attr));
