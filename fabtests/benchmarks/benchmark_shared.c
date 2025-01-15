@@ -333,7 +333,7 @@ int pingpong_rma(enum ft_rma_opcodes rma_op, struct fi_rma_iov *remote)
 			if (rma_op == FT_RMA_WRITE)
 				*(tx_buf + opts.transfer_size - 1) = (char)i;
 
-			if (opts.transfer_size <= inject_size)
+			if (opts.transfer_size < inject_size)
 				ret = ft_inject_rma(rma_op, remote, ep,
 						    remote_fi_addr,
 						    opts.transfer_size);
@@ -359,7 +359,7 @@ int pingpong_rma(enum ft_rma_opcodes rma_op, struct fi_rma_iov *remote)
 			if (rma_op == FT_RMA_WRITE)
 				*(tx_buf + opts.transfer_size - 1) = (char)i;
 
-			if (opts.transfer_size <= inject_size)
+			if (opts.transfer_size < inject_size)
 				ret = ft_inject_rma(rma_op, remote, ep,
 						remote_fi_addr,
 						opts.transfer_size);

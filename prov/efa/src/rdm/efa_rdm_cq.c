@@ -686,6 +686,7 @@ int efa_rdm_cq_open(struct fid_domain *domain, struct fi_cq_attr *attr,
 	*cq_fid = &cq->efa_cq.util_cq.cq_fid;
 	(*cq_fid)->fid.ops = &efa_rdm_cq_fi_ops;
 	(*cq_fid)->ops = &efa_rdm_cq_ops;
+	cq->efa_cq.util_cq.progress = efa_cq_progress;
 
 	/* open shm cq as peer cq */
 	if (efa_domain->shm_domain) {

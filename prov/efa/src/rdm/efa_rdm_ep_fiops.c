@@ -14,6 +14,9 @@
 #include "efa_rdm_pke_req.h"
 #include "efa_cntr.h"
 
+extern struct fi_ops_msg efa_msg_ops;
+extern struct fi_ops_rma efa_rma_ops;
+
 static
 void efa_rdm_ep_construct_ibv_qp_init_attr_ex(struct efa_rdm_ep *ep,
 					struct ibv_qp_init_attr_ex *attr_ex,
@@ -558,7 +561,7 @@ int efa_rdm_ep_open(struct fid_domain *domain, struct fi_info *info,
 	efa_rdm_ep->max_atomic_size = info->ep_attr->max_msg_size;
 	efa_rdm_ep->inject_tagged_size = info->tx_attr->inject_size;
 	efa_rdm_ep->inject_atomic_size = info->tx_attr->inject_size;
-	efa_rdm_ep->base_ep.inject_rma_size = info->tx_attr->inject_size;
+	efa_rdm_ep->base_ep.inject_rma_size = 0;
 	efa_rdm_ep->efa_max_outstanding_tx_ops = efa_domain->device->rdm_info->tx_attr->size;
 	efa_rdm_ep->efa_max_outstanding_rx_ops = efa_domain->device->rdm_info->rx_attr->size;
 	efa_rdm_ep->use_device_rdma = efa_rdm_get_use_device_rdma(info->fabric_attr->api_version);
@@ -636,8 +639,8 @@ int efa_rdm_ep_open(struct fid_domain *domain, struct fi_info *info,
 	}
 
 	*ep = &efa_rdm_ep->base_ep.util_ep.ep_fid;
-	(*ep)->msg = &efa_rdm_msg_ops;
-	(*ep)->rma = &efa_rdm_rma_ops;
+	(*ep)->msg = &efa_msg_ops;
+	(*ep)->rma = &efa_rma_ops;
 	(*ep)->atomic = &efa_rdm_atomic_ops;
 	(*ep)->tagged = &efa_rdm_msg_tagged_ops;
 	(*ep)->fid.ops = &efa_rdm_ep_base_ops;
