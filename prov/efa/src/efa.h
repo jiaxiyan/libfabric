@@ -107,6 +107,16 @@ struct efa_fabric {
 #endif
 };
 
+struct efa_context {
+	uint64_t completion_flags;
+	fi_addr_t addr;
+};
+
+#if defined(static_assert) && defined(__x86_64__)
+static_assert(sizeof(struct efa_context) <= sizeof(struct fi_context2),
+	      "efa_context must not be larger than fi_context2");
+#endif
+
 static inline
 int efa_str_to_ep_addr(const char *node, const char *service, struct efa_ep_addr *addr)
 {
