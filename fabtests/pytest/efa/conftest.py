@@ -28,6 +28,16 @@ def memory_type_bi_dir(request):
 def rma_operation_type(request):
     return request.param
 
+@pytest.fixture(scope="function", params=["read", "writedata", "write"])
+def direct_rma_operation_type(request, cmdline_args):
+    if request.param == 'read' and not has_rdma(cmdline_args, 'read'):
+        pytest.skip("fi_read is not supported")
+    if request.param == 'write' and not has_rdma(cmdline_args, 'write'):
+        pytest.skip("fi_write is not supported")
+    if request.param == 'writedata' and not has_rdma(cmdline_args, 'writedata'):
+        pytest.skip("fi_writedata is not supported")
+    return request.param
+
 @pytest.fixture(scope="module")
 def rma_bw_memory_type(memory_type, rma_operation_type):
     is_test_bi_dir = False if rma_operation_type == "writedata" else True

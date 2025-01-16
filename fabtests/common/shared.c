@@ -2565,6 +2565,8 @@ ssize_t ft_post_rx_buf(struct fid_ep *ep, size_t size, void *ctx,
 		       void *op_buf, void *op_mr_desc, uint64_t op_tag)
 {
 	size = MAX(size, FT_MAX_CTRL_MSG) + ft_rx_prefix_size();
+	if (opts.max_msg_size)
+		size = MIN(size, opts.max_msg_size);
 	if (hints->caps & FI_TAGGED) {
 		op_tag = op_tag ? op_tag : rx_seq;
 		FT_POST(fi_trecv, ft_progress, rxcq, rx_seq, &rx_cq_cntr,

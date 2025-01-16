@@ -141,3 +141,24 @@ def test_rdm_bw_zcpy_recv_use_fi_more(cmdline_args, memory_type, zcpy_recv_max_m
     cmdline_args_copy.append_environ("FI_EFA_ENABLE_SHM_TRANSFER=0")
     efa_run_client_server_test(cmdline_args_copy, f"fi_rdm_bw --use-fi-more --max-msg-size {zcpy_recv_max_msg_size}",
                                "short", "transmit_complete", memory_type, zcpy_recv_message_size)
+
+@pytest.mark.functional
+def test_direct_pingpong(cmdline_args, memory_type_bi_dir, zcpy_recv_max_msg_size, zcpy_recv_message_size):
+    cmdline_args_copy = copy.copy(cmdline_args)
+    cmdline_args_copy.append_environ("FI_EFA_USE_EFA_DIRECT=1")
+    efa_run_client_server_test(cmdline_args_copy, f"fi_rdm_pingpong --max-msg-size {zcpy_recv_max_msg_size}",
+                               "short", "transmit_complete", memory_type_bi_dir, zcpy_recv_message_size)
+
+@pytest.mark.functional
+def test_direct_bw(cmdline_args, memory_type, zcpy_recv_max_msg_size, zcpy_recv_message_size):
+    cmdline_args_copy = copy.copy(cmdline_args)
+    cmdline_args_copy.append_environ("FI_EFA_USE_EFA_DIRECT=1")
+    efa_run_client_server_test(cmdline_args_copy, f"fi_rdm_bw --max-msg-size {zcpy_recv_max_msg_size}",
+                               "short", "transmit_complete", memory_type, zcpy_recv_message_size)
+
+@pytest.mark.functional
+def test_direct_bw_use_fi_more(cmdline_args, memory_type, zcpy_recv_max_msg_size, zcpy_recv_message_size):
+    cmdline_args_copy = copy.copy(cmdline_args)
+    cmdline_args_copy.append_environ("FI_EFA_USE_EFA_DIRECT=1")
+    efa_run_client_server_test(cmdline_args_copy, f"fi_rdm_bw --use-fi-more --max-msg-size {zcpy_recv_max_msg_size}",
+                               "short", "transmit_complete", memory_type, zcpy_recv_message_size)

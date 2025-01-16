@@ -283,6 +283,10 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 			goto err_free;
 		}
 		efa_domain->util_domain.domain_fid.ops = &efa_ops_domain_rdm;
+		if (efa_env.use_efa_direct) {
+			efa_domain->util_domain.domain_fid.ops->endpoint = efa_ep_open;
+			efa_domain->util_domain.domain_fid.ops->cq_open = efa_cq_open;
+		}
 	} else {
 		assert(EFA_EP_TYPE_IS_DGRAM(info));
 		efa_domain->util_domain.domain_fid.ops = &efa_ops_domain_dgram;

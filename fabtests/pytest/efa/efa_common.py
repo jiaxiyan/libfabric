@@ -67,6 +67,7 @@ def has_gdrcopy(hostname):
     process = subprocess.run(command, shell=True, check=False, stdout=subprocess.PIPE)
     return process.returncode == 0
 
+@functools.lru_cache(10)
 def has_rdma(cmdline_args, operation):
     """
     determine whether a host has rdma <operation> enabled in efa device
