@@ -3,12 +3,13 @@ import pytest
 from efa.efa_common import has_gdrcopy, has_rdma
 
 
+# This test skips efa-direct because it does not have the read protocol
 # TODO Expand this test to run on all memory types (and rename)
 @pytest.mark.serial
 @pytest.mark.functional
 @pytest.mark.cuda_memory
 @pytest.mark.parametrize("fabtest_name,cntrl_env_var", [("fi_rdm_tagged_bw", "FI_EFA_INTER_MIN_READ_MESSAGE_SIZE"), ("fi_rma_bw", "FI_EFA_INTER_MIN_READ_WRITE_SIZE")])
-def test_transfer_with_read_protocol_cuda(cmdline_args, fabtest_name, cntrl_env_var, fabric):
+def test_transfer_with_read_protocol_cuda(cmdline_args, fabtest_name, cntrl_env_var):
     """
     Verify that the read protocol is used for a 1024 byte message when the env variable
     switches are set to force the read protocol at 1000 bytes.
@@ -29,9 +30,6 @@ def test_transfer_with_read_protocol_cuda(cmdline_args, fabtest_name, cntrl_env_
 
     if not has_cuda(cmdline_args.client_id) or not has_cuda(cmdline_args.server_id):
         pytest.skip("Client and server both need a Cuda device")
-
-    if fabtest_name == "fi_rdm_tagged_bw" and fabric == "efa-direct":
-        pytest.skip("efa-direct does not support tagged")
 
     message_size = 1024
 
@@ -54,7 +52,7 @@ def test_transfer_with_read_protocol_cuda(cmdline_args, fabtest_name, cntrl_env_
                                memory_type="cuda_to_cuda",
                                message_size=message_size,
                                warmup_iteration_type="0",
-                               fabric=fabric)
+                               fabric="efa")
 
     server_read_wrs_after_test = efa_retrieve_hw_counter_value(cmdline_args.server_id, "rdma_read_wrs")
     server_read_bytes_after_test = efa_retrieve_hw_counter_value(cmdline_args.server_id, "rdma_read_bytes")

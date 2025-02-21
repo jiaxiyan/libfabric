@@ -4,6 +4,7 @@ import pytest
                          [pytest.param("short", marks=pytest.mark.short),
                           pytest.param("standard", marks=pytest.mark.standard)])
 @pytest.mark.parametrize("message_size", ["1024", "8192"])
+# efa-direct does not support multi-recv
 def test_multi_recv(cmdline_args, iteration_type, message_size):
     from common import ClientServerTest
     test = ClientServerTest(cmdline_args,

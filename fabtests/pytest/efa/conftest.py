@@ -88,6 +88,16 @@ def direct_rma_size(request):
 def fabric(request):
     return request.param
 
+@pytest.fixture(scope="module")
+def rma_fabric(cmdline_args, fabric):
+    if fabric == 'efa-direct' and (
+        not has_rdma(cmdline_args, 'read') or
+        not has_rdma(cmdline_args, 'write') or
+        not has_rdma(cmdline_args, 'writedata')
+    ):
+        pytest.skip("FI_RMA is not supported. Skip rma tests on efa-direct.")
+    return fabric
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_collection_modifyitems(session, config, items):
     # Called after collection has been performed, may filter or re-order the items in-place

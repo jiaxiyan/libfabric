@@ -5,6 +5,7 @@ import pytest
 
 
 # this test must be run in serial mode because it check hw counter
+# efa-direct does not have runt read so skip this test
 @pytest.mark.serial
 @pytest.mark.functional
 @pytest.mark.parametrize("memory_type,copy_method", [

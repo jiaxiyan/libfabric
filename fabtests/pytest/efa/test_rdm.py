@@ -11,6 +11,7 @@ def test_rdm_efa(cmdline_args, completion_semantic, fabric):
     test = ClientServerTest(cmdline_args, "fi_rdm", completion_semantic=completion_semantic, fabric=fabric)
     test.run()
 
+# This test skips efa-direct because it requests FI_ORDER_SAS
 @pytest.mark.functional
 def test_rdm_bw_functional_efa(cmdline_args, completion_semantic):
     from common import ClientServerTest
@@ -30,6 +31,8 @@ def test_rdm_pingpong(cmdline_args, iteration_type, completion_semantic,
                                direct_message_size if fabric == "efa-direct" else "all",
                                completion_type=completion_type, fabric=fabric)
 
+# This test skips efa-direct because efa-direct does not
+# do memory registrations on behalf of the application
 @pytest.mark.functional
 @pytest.mark.serial
 def test_mr_exhaustion_rdm_pingpong(cmdline_args, completion_semantic):
@@ -131,6 +134,7 @@ def test_rdm_tagged_peek(cmdline_args):
     test.run()
 
 # This test is run in serial mode because it takes a lot of memory
+# It is skipped for efa-direct because 1GB exceeds device max msg size
 @pytest.mark.serial
 @pytest.mark.functional
 def test_rdm_pingpong_1G(cmdline_args, completion_semantic):
