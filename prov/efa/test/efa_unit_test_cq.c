@@ -348,9 +348,8 @@ void test_ibv_cq_ex_read_bad_recv_status(struct efa_resource **state)
  * @brief verify that fi_cq_read/fi_eq_read works properly when rdma-core return bad status for
  * recv rdma with imm.
  *
- * When getting a wc error of op code IBV_WC_RECV_RDMA_WITH_IMM, libfabric cannot find the
- * corresponding application operation to write a cq error.
- * It will write an EQ error instead.
+ * When getting a wc error of op code IBV_WC_RECV_RDMA_WITH_IMM, libfabric will write a cq error
+ * with null op_context.
  *
  * @param[in]	state					struct efa_resource that is managed by the framework
  * @param[in]	use_unsolicited_recv	whether to use unsolicited write recv
@@ -360,7 +359,6 @@ void test_ibv_cq_ex_read_bad_recv_rdma_with_imm_status_impl(struct efa_resource 
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct efa_resource *resource = *state;
 	struct fi_cq_data_entry cq_entry;
-	struct fi_eq_err_entry eq_err_entry;
 	int ret;
 	struct efa_rdm_cq *efa_rdm_cq;
 	struct ibv_cq_ex *ibv_cqx;
@@ -368,6 +366,16 @@ void test_ibv_cq_ex_read_bad_recv_rdma_with_imm_status_impl(struct efa_resource 
 
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+	//more mock needed
+	fi_addr_t addr;
+	size_t raw_addr_len = sizeof(struct efa_ep_addr);
+	struct efa_ep_addr raw_addr;
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, &addr, 0 /* flags */, NULL /* context */);
+	assert_int_equal(ret, 1);
 
 	efa_rdm_cq = container_of(resource->cq, struct efa_rdm_cq, efa_cq.util_cq.cq_fid.fid);
 	ibv_cqx = efa_rdm_cq->efa_cq.ibv_cq.ibv_cq_ex;
@@ -392,6 +400,10 @@ void test_ibv_cq_ex_read_bad_recv_rdma_with_imm_status_impl(struct efa_resource 
 
 #if HAVE_CAPS_UNSOLICITED_WRITE_RECV
 	if (use_unsolicited_recv) {
+		ibv_cqx->read_slid = &efa_mock_ibv_read_slid_return_mock;
+		ibv_cqx->read_src_qp = &efa_mock_ibv_read_src_qp_return_mock;
+		will_return_maybe(efa_mock_ibv_read_slid_return_mock, efa_av_addr_to_conn(efa_rdm_ep->base_ep.av, addr)->ah->ahn);
+		will_return_maybe(efa_mock_ibv_read_src_qp_return_mock, raw_addr.qpn);
 		efadv_cq_from_ibv_cq_ex(ibv_cqx)->wc_is_unsolicited = &efa_mock_efadv_wc_is_unsolicited;
 		will_return(efa_mock_efa_device_support_unsolicited_write_recv, true);
 		will_return(efa_mock_efadv_wc_is_unsolicited, true);
@@ -416,17 +428,15 @@ void test_ibv_cq_ex_read_bad_recv_rdma_with_imm_status_impl(struct efa_resource 
 	efa_rdm_ep->efa_rx_pkts_posted = efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
 	ibv_cqx->wr_id = (uintptr_t)pkt_entry;
 #endif
-	/* the recv rdma with imm will not populate to application cq because it's an EFA internal error and
-	 * and not related to any application operations. Currently we can only read the error from eq.
+	/* the recv rdma with imm will populate to application cq with null op_context
 	 */
 	ibv_cqx->status = IBV_WC_GENERAL_ERR;
 	ret = fi_cq_read(resource->cq, &cq_entry, 1);
 	assert_int_equal(ret, -FI_EAGAIN);
-
-	ret = fi_eq_readerr(resource->eq, &eq_err_entry, 0);
-	assert_int_equal(ret, sizeof(eq_err_entry));
-	assert_int_not_equal(eq_err_entry.err, FI_SUCCESS);
-	assert_int_equal(eq_err_entry.prov_errno, EFA_IO_COMP_STATUS_FLUSHED);
+#if HAVE_CAPS_UNSOLICITED_WRITE_RECV
+	if (use_unsolicited_recv)
+		assert_int_equal(cq_entry.op_context, NULL);
+#endif
 }
 
 void test_ibv_cq_ex_read_bad_recv_rdma_with_imm_status_use_unsolicited_recv(struct efa_resource **state)

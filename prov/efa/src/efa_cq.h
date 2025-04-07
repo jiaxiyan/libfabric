@@ -273,6 +273,9 @@ static inline int efa_write_error_msg(struct efa_base_ep *ep, fi_addr_t addr,
 	return 0;
 }
 
+void efa_cq_handle_error(struct efa_base_ep *base_ep,
+			 struct ibv_cq_ex *ibv_cq_ex, int err, int prov_errno,
+			 bool is_tx);
 void efa_cq_poll_ibv_cq(ssize_t cqe_to_process, struct efa_ibv_cq *ibv_cq);
 
 #endif /* end of _EFA_CQ_H*/

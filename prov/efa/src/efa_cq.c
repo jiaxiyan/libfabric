@@ -71,9 +71,9 @@ static void efa_cq_construct_cq_entry(struct ibv_cq_ex *ibv_cqx,
  * @param[in]	prov_errno  positive EFA provider specific error code
  * @param[in]	is_tx       if the error is for TX or RX operation
  */
-static void efa_cq_handle_error(struct efa_base_ep *base_ep,
-				struct ibv_cq_ex *ibv_cq_ex, int err,
-				int prov_errno, bool is_tx)
+void efa_cq_handle_error(struct efa_base_ep *base_ep,
+			 struct ibv_cq_ex *ibv_cq_ex, int err, int prov_errno,
+			 bool is_tx)
 {
 	struct fi_cq_err_entry err_entry;
 	fi_addr_t addr;
