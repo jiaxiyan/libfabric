@@ -761,6 +761,10 @@ AS_IF([test x"$with_cuda" != x"no"],
 			[],
 			[have_cuda_dmabuf_mapping_type_pcie=0],
 			[[#include <cuda.h>]])
+	AC_CHECK_DECL([cuDriverGetVersion],
+			[],
+			[have_cuda_dmabuf_mapping_type_pcie=0],
+			[[#include <cuda.h>]])
       ])
 
 AC_DEFINE_UNQUOTED([ENABLE_CUDA_DLOPEN], [$cuda_dlopen], [dlopen CUDA libraries])

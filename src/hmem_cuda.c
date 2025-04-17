@@ -87,7 +87,8 @@
 	_(cudaSetDevice)		\
 	_(cudaIpcOpenMemHandle)		\
 	_(cudaIpcGetMemHandle)		\
-	_(cudaIpcCloseMemHandle)
+	_(cudaIpcCloseMemHandle)	\
+	_(cudaDriverGetVersion)		\
 
 #define NVML_FUNCS_DEF(_)	        \
 	_(nvmlInit_v2)                  \
@@ -162,14 +163,12 @@ static struct {
 	nvmlReturn_t (*nvmlInit_v2)(void);
 	nvmlReturn_t (*nvmlDeviceGetCount_v2)(unsigned int *deviceCount);
 	nvmlReturn_t (*nvmlShutdown)(void);
+	​cudaError_t (*cudaDriverGetVersion)(int *driverVersion);
 } cuda_ops
 #if !ENABLE_CUDA_DLOPEN
 #define CUDA_OPS_INIT(sym) .sym = sym,
-= {
-	CUDA_DRIVER_FUNCS_DEF(CUDA_OPS_INIT)
-	CUDA_RUNTIME_FUNCS_DEF(CUDA_OPS_INIT)
-	NVML_FUNCS_DEF(CUDA_OPS_INIT)
-}
+	= {CUDA_DRIVER_FUNCS_DEF(CUDA_OPS_INIT) CUDA_RUNTIME_FUNCS_DEF(
+		CUDA_OPS_INIT) NVML_FUNCS_DEF(CUDA_OPS_INIT)}
 #endif
 ;
 
@@ -324,6 +323,11 @@ cudaError_t ofi_cudaMalloc(void **ptr, size_t size)
 cudaError_t ofi_cudaFree(void *ptr)
 {
 	return cuda_ops.cudaFree(ptr);
+}
+
+​cudaError_t ofi_cudaDriverGetVersion(int *driverVersion)
+{
+	return cuda_ops.cudaDriverGetVersion(driverVersion);
 }
 
 int cuda_copy_to_dev(uint64_t device, void *dst, const void *src, size_t size)
@@ -722,10 +726,15 @@ int cuda_get_dmabuf_fd(const void *addr, uint64_t size, int *fd,
 	aligned_size = (uintptr_t) ofi_get_page_end((void *) ((uintptr_t) base_addr + total_size - 1),
 						    host_page_size) - (uintptr_t) aligned_ptr + 1;
 
-# if HAVE_CUDA_DMABUF_MAPPING_TYPE_PCIE
-	flags = CU_MEM_RANGE_FLAG_DMA_BUF_MAPPING_TYPE_PCIE;
-# else
 	flags = 0;
+#if HAVE_CUDA_DMABUF_MAPPING_TYPE_PCIE
+	int driver_version = 0;
+	cuda_ret = cuda_ops.cuDriverGetVersion(&driver_version);
+	if (cuda_ret != CUDA_SUCCESS)
+		CUDA_DRIVER_LOG_ERR(cuda_ret, "cuDriverGetVersion");
+	/* CU_MEM_RANGE_FLAG_DMA_BUF_MAPPING_TYPE_PCIE is introduced in CUDA 12.8 */
+	if (driver_version >= 12080)
+		flags = CU_MEM_RANGE_FLAG_DMA_BUF_MAPPING_TYPE_PCIE;
 # endif /* HAVE_CUDA_DMABUF_MAPPING_TYPE_PCIE */
 	cuda_ret = cuda_ops.cuMemGetHandleForAddressRange(
 						(void *)fd,

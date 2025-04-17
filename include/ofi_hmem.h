@@ -71,6 +71,7 @@ cudaError_t ofi_cudaHostRegister(void *ptr, size_t size, unsigned int flags);
 cudaError_t ofi_cudaHostUnregister(void *ptr);
 cudaError_t ofi_cudaMalloc(void **ptr, size_t size);
 cudaError_t ofi_cudaFree(void *ptr);
+cudaError_t ofi_cudaDriverGetVersion(int *driverVersion);
 
 #endif /* HAVE_CUDA */
 

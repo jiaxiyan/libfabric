@@ -183,6 +183,10 @@ AS_IF([test x"$have_cuda" = x"1"],
 			[],
 			[have_cuda_dmabuf_mapping_type_pcie=0],
 			[[#include <cuda.h>]])
+            AC_CHECK_DECL([cuDriverGetVersion],
+			[],
+			[have_cuda_dmabuf_mapping_type_pcie=0],
+			[[#include <cuda.h>]])
       ])
 
 AC_DEFINE_UNQUOTED([HAVE_CUDA_DMABUF], [$have_cuda_dmabuf], [CUDA dmabuf support])

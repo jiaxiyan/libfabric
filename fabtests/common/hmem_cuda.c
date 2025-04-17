@@ -67,6 +67,7 @@ struct cuda_ops {
 	CUresult (*cuDeviceGet)(CUdevice* device, int ordinal);
 	CUresult (*cuMemGetAddressRange)( CUdeviceptr* pbase,
 					  size_t* psize, CUdeviceptr dptr);
+	​cudaError_t (*cudaDriverGetVersion)(int *driverVersion);
 };
 
 static struct cuda_ops cuda_ops;
@@ -215,6 +216,12 @@ int ft_cuda_init(void)
 	cuda_ops.cudaSetDevice = dlsym(cudart_handle, STRINGIFY(cudaSetDevice));
 	if (!cuda_ops.cudaSetDevice) {
 		FT_ERR("Failed to find cudaSetDevice");
+		goto err_dlclose_cuda;
+	}
+
+	cuda_ops.cudaDriverGetVersion = dlsym(cudart_handle, STRINGIFY(cudaDriverGetVersion));
+	if (!cuda_ops.cudaDriverGetVersion) {
+		FT_ERR("Failed to find cudaDriverGetVersion");
 		goto err_dlclose_cuda;
 	}
 
@@ -451,10 +458,15 @@ int ft_cuda_get_dmabuf_fd(void *buf, size_t len,
 	aligned_size = (uintptr_t) ft_get_page_end((void *) ((uintptr_t) base_addr + total_size - 1),
 						    host_page_size) - (uintptr_t) aligned_ptr + 1;
 
-# if HAVE_CUDA_DMABUF_MAPPING_TYPE_PCIE
-	flags = CU_MEM_RANGE_FLAG_DMA_BUF_MAPPING_TYPE_PCIE;
-# else
 	flags = 0;
+#if HAVE_CUDA_DMABUF_MAPPING_TYPE_PCIE
+	int driver_version = 0;
+	cuda_ret = cuda_ops.cuDriverGetVersion(&driver_version);
+	if (cuda_ret != CUDA_SUCCESS)
+		ft_cuda_driver_api_print_error(cuda_ret, "cuDriverGetVersion");
+	/* CU_MEM_RANGE_FLAG_DMA_BUF_MAPPING_TYPE_PCIE is introduced in CUDA 12.8 */
+	if (driver_version >= 12080)
+		flags = CU_MEM_RANGE_FLAG_DMA_BUF_MAPPING_TYPE_PCIE;
 # endif /* HAVE_CUDA_DMABUF_MAPPING_TYPE_PCIE */
 	cuda_ret = cuda_ops.cuMemGetHandleForAddressRange(
 						(void *)dmabuf_fd,
