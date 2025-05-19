@@ -26,6 +26,12 @@ struct efa_cq {
 	struct efa_ibv_cq	ibv_cq;
 };
 
+/* cq with external memory provided via dmabuf */
+struct efa_cq_ext {
+	struct fid_cq		cq_fid;
+	struct efa_ibv_cq	ibv_cq;
+};
+
 /*
  * Control header with completion data. CQ data length is static.
  */
