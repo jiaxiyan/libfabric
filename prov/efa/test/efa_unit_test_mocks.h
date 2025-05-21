@@ -170,6 +170,9 @@ struct efa_unit_test_mocks
 #if HAVE_EFADV_QUERY_CQ
 	int (*efadv_query_cq)(struct ibv_cq *ibvcq, struct efadv_cq_attr *attr, uint32_t inlen);
 #endif
+
+	struct ibv_cq *(*ibv_cq_ex_to_cq)(struct ibv_cq_ex *cq);
+	int (*ibv_destroy_cq)(struct ibv_cq *cq);
 };
 
 struct ibv_cq_ex *efa_mock_create_cq_ex_return_null(struct ibv_context *context, struct ibv_cq_init_attr_ex *init_attr);
@@ -238,4 +241,9 @@ enum ibv_fork_status __real_ibv_is_fork_initialized(void);
 
 enum ibv_fork_status efa_mock_ibv_is_fork_initialized_return_mock(void);
 
+struct ibv_cq *__real_ibv_cq_ex_to_cq(struct ibv_cq_ex *cq);
+struct ibv_cq *efa_mock_ibv_cq_ex_to_cq(struct ibv_cq_ex *cq);
+
+int __real_ibv_destroy_cq(struct ibv_cq *cq);
+int efa_mock_ibv_destroy_cq(struct ibv_cq *cq);
 #endif

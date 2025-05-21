@@ -281,6 +281,8 @@ struct efa_unit_test_mocks g_efa_unit_test_mocks = {
 #if HAVE_EFADV_QUERY_CQ
 	.efadv_query_cq = __real_efadv_query_cq,
 #endif
+	.ibv_destroy_cq = __real_ibv_destroy_cq,
+	.ibv_cq_ex_to_cq = __real_ibv_cq_ex_to_cq,
 };
 
 struct ibv_ah *__wrap_ibv_create_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr)
@@ -531,3 +533,23 @@ int efa_mock_efadv_query_cq(struct ibv_cq *ibvcq, struct efadv_cq_attr *attr, ui
 	return 0;
 }
 #endif /* HAVE_EFADV_QUERY_CQ */
+
+struct ibv_cq *__wrap_ibv_cq_ex_to_cq(struct ibv_cq_ex *cq)
+{
+	return g_efa_unit_test_mocks.ibv_cq_ex_to_cq(cq);
+}
+
+struct ibv_cq *efa_mock_ibv_cq_ex_to_cq(struct ibv_cq_ex *cq)
+{
+    return (struct ibv_cq *)mock();
+}
+
+int __wrap_ibv_destroy_cq(struct ibv_cq *cq)
+{
+	return g_efa_unit_test_mocks.ibv_destroy_cq(cq);
+}
+
+int efa_mock_ibv_destroy_cq(struct ibv_cq *cq)
+{
+    return (int)mock();
+}

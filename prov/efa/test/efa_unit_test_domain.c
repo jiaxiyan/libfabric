@@ -2,6 +2,7 @@
 /* SPDX-FileCopyrightText: Copyright Amazon.com, Inc. or its affiliates. All rights reserved. */
 
 #include "efa_unit_tests.h"
+#include "efa_cq.h"
 
 /**
  * @brief Verify the info type in struct efa_domain for efa RDM path
@@ -305,6 +306,38 @@ void test_efa_domain_open_ops_cq_open_ext(struct efa_resource **state)
     struct efa_cq_ext *efa_cq_ext = container_of(cq_fid, struct efa_cq_ext, cq_fid);
     assert_non_null(efa_cq_ext->ibv_cq.ibv_cq_ex);
     assert_int_equal(efa_cq_ext->ibv_cq.ibv_cq_ex_type, EFADV_CQ);
+#else
+    assert_int_equal(ret, -FI_ENOSYS);
+#endif
+}
+
+void test_efa_domain_open_ops_cq_close_ext(struct efa_resource **state)
+{
+    struct efa_resource *resource = *state;
+    struct fi_efa_ops_domain *efa_domain_ops;
+    struct efa_cq_ext *cq_ext = calloc(1, sizeof(*cq_ext));
+    int ret;
+
+    efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+
+    ret = fi_open_ops(&resource->domain->fid, FI_EFA_DOMAIN_OPS, 0, (void **)&efa_domain_ops, NULL);
+    assert_int_equal(ret, 0);
+
+#if HAVE_CAPS_CQ_WITH_EXT_MEM_DMABUF && HAVE_EFADV_CQ_EX
+    struct ibv_cq_ex cq_ex;
+    struct ibv_cq cq;
+
+    cq_ext->ibv_cq.ibv_cq_ex = &cq_ex;
+    g_efa_unit_test_mocks.ibv_cq_ex_to_cq = &efa_mock_ibv_cq_ex_to_cq;
+    g_efa_unit_test_mocks.ibv_destroy_cq = &efa_mock_ibv_destroy_cq;
+    will_return(efa_mock_ibv_cq_ex_to_cq, &cq);
+    will_return(efa_mock_ibv_destroy_cq, 0);
+#endif
+    ret = efa_domain_ops->cq_close_ext(&cq_ext->cq_fid.fid);
+
+#if HAVE_CAPS_CQ_WITH_EXT_MEM_DMABUF && HAVE_EFADV_CQ_EX
+    assert_int_equal(ret, FI_SUCCESS);
+    assert_null(cq_ext->ibv_cq.ibv_cq_ex);
 #else
     assert_int_equal(ret, -FI_ENOSYS);
 #endif
