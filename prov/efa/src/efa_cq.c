@@ -423,6 +423,7 @@ int efa_cq_open(struct fid_domain *domain_fid, struct fi_cq_attr *attr,
 {
 	struct efa_cq *cq;
 	struct efa_domain *efa_domain;
+	struct fi_efa_ext_mem_dmabuf ext_mem_dmabuf = {0};
 	int err, retv;
 
 	if (attr->wait_obj != FI_WAIT_NONE)
@@ -443,7 +444,8 @@ int efa_cq_open(struct fid_domain *domain_fid, struct fi_cq_attr *attr,
 				  util_domain);
 	err = efa_cq_ibv_cq_ex_open(attr, efa_domain->device->ibv_ctx,
 				    &cq->ibv_cq.ibv_cq_ex,
-				    &cq->ibv_cq.ibv_cq_ex_type);
+				    &cq->ibv_cq.ibv_cq_ex_type,
+				    0, &ext_mem_dmabuf);
 	if (err) {
 		EFA_WARN(FI_LOG_CQ, "Unable to create extended CQ: %s\n", fi_strerror(err));
 		goto err_free_util_cq;

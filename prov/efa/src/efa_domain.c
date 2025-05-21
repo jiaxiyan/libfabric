@@ -541,10 +541,114 @@ static int efa_domain_query_cq(struct fid_cq *cq_fid, struct fi_efa_cq_attr *cq_
 #endif /* HAVE_EFADV_QUERY_CQ */
 
 
+#if HAVE_CAPS_CQ_WITH_EXT_MEM_DMABUF && HAVE_EFADV_CQ_EX
+/**
+ * @brief Create a completion queue with external memory provided via dmabuf.
+ *
+ * @param domain_fid Open resource domain
+ * @param attr Completion queue attributes
+ * @param flags Flags for creating CQ. Currently only EFADV_CQ_INIT_FLAGS_EXT_MEM_DMABUF is supported.
+ * @param ext_mem_dmabuf Structure containing information about external memory
+ * when using EFADV_CQ_INIT_FLAGS_EXT_MEM_DMABUF flag.
+ * @param cq_fid pointer to the created completion queue fid
+ * @param context User specified context associated with the completion queue.
+ * @return 0 on success, negative integer on failure
+ */
+static int efa_domain_cq_open_ext(struct fid_domain *domain_fid,
+				  struct fi_cq_attr *attr, uint64_t flags,
+				  struct fi_efa_ext_mem_dmabuf *ext_mem_dmabuf,
+				  struct fid_cq **cq_fid, void *context)
+{
+	struct efa_cq_ext *cq_ext;
+	struct efa_domain *efa_domain;
+	int err, retv;
+
+	if (attr->wait_obj != FI_WAIT_NONE)
+		return -FI_ENOSYS;
+
+	if (!(flags & FI_CQ_ATTR_EXT_MEM_DMABUF)) {
+		EFA_WARN(FI_LOG_DOMAIN, "EFADV_CQ_INIT_FLAGS_EXT_MEM_DMABUF flag is not set\n");
+		return -FI_EINVAL;
+	}
+
+	if (!ext_mem_dmabuf) {
+		EFA_WARN(FI_LOG_DOMAIN, "struct ext_mem_dmabuf is invalid\n");
+		return -FI_EINVAL;
+	}
+
+	cq_ext = calloc(1, sizeof(*cq_ext));
+	if (!cq_ext)
+		return -FI_ENOMEM;
+
+	efa_domain = container_of(domain_fid, struct efa_domain, util_domain.domain_fid);
+	err = efa_cq_ibv_cq_ex_open(attr, efa_domain->device->ibv_ctx,
+				    &cq_ext->ibv_cq.ibv_cq_ex,
+				    &cq_ext->ibv_cq.ibv_cq_ex_type,
+				    flags, ext_mem_dmabuf);
+	if (err) {
+		EFA_WARN(FI_LOG_CQ, "Unable to create extended CQ with external memory: %s\n", fi_strerror(err));
+		goto err_free_cq;
+	}
+
+	*cq_fid = &cq_ext->cq_fid;
+	(*cq_fid)->fid.fclass = FI_CLASS_CQ;
+	(*cq_fid)->fid.context = context;
+
+	return 0;
+
+err_free_cq:
+	free(cq_ext);
+	return err;
+}
+
+/**
+ * @brief Close a completion queue with external memory.
+ *
+ * @param cq fid of the completion queue
+ * @return 0 on success, negative integer on failure
+ */
+static int efa_domain_cq_close_ext(struct fid *cq)
+{
+	struct efa_cq_ext *cq_ext;
+	int ret;
+
+	cq_ext = container_of(cq, struct efa_cq_ext, cq_fid.fid);
+
+	if (cq_ext->ibv_cq.ibv_cq_ex) {
+		ret = -ibv_destroy_cq(ibv_cq_ex_to_cq(cq_ext->ibv_cq.ibv_cq_ex));
+		if (ret) {
+			EFA_WARN(FI_LOG_CQ, "Unable to close ibv cq: %s\n",
+				fi_strerror(-ret));
+			return ret;
+		}
+		cq_ext->ibv_cq.ibv_cq_ex = NULL;
+	}
+
+	free(cq_ext);
+
+	return 0;
+}
+#else
+static int efa_domain_cq_open_ext(struct fid_domain *domain_fid,
+	struct fi_cq_attr *attr, uint64_t flags,
+	struct fi_efa_ext_mem_dmabuf *ext_mem_dmabuf,
+	struct fid_cq **cq_fid, void *context)
+{
+	return -FI_ENOSYS;
+}
+
+static int efa_domain_cq_close_ext(struct fid *cq)
+{
+	return -FI_ENOSYS;
+}
+#endif
+
 static struct fi_efa_ops_domain efa_ops_domain = {
 	.query_mr = efa_domain_query_mr,
 	.query_qp_wqs = efa_domain_query_qp_wqs,
 	.query_cq = efa_domain_query_cq,
+	.cq_open_ext = efa_domain_cq_open_ext,
+	.cq_close_ext = efa_domain_cq_close_ext,
 };
 
 static int
