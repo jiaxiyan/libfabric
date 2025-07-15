@@ -38,7 +38,7 @@ def pytest_addoption(parser):
                              help=option_helpmsg, default=option_default)
 
 # base ssh command
-bssh = "ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes"
+bssh = "ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes"
 
 class CmdlineArgs:
 
@@ -131,7 +131,7 @@ class CmdlineArgs:
 
         host_id = self.client_id if host_type == "client" else self.server_id
 
-        command = f"timeout {timeout} /bin/bash --login -c {shlex.quote(command)}"
+        command = f"/bin/bash --login -c {shlex.quote(command)}"
         command = f"{bssh} {host_id} {shlex.quote(command)}"
 
         return command
