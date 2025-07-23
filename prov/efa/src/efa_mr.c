@@ -514,15 +514,15 @@ static struct ibv_mr *efa_mr_reg_ibv_mr(struct efa_mr *efa_mr, struct fi_mr_attr
 	int ret;
 	struct ibv_mr *ibv_mr;
 
-	if (flags & FI_MR_DMABUF)
-		return efa_mr_reg_ibv_dmabuf_mr(
-			efa_mr->domain->ibv_pd,
-			mr_attr->dmabuf->offset,
-			mr_attr->dmabuf->len,
-			(uintptr_t) mr_attr->dmabuf->base_addr + mr_attr->dmabuf->offset,
-			mr_attr->dmabuf->fd,
-			access
-		);
+	// if (flags & FI_MR_DMABUF)
+	// 	return efa_mr_reg_ibv_dmabuf_mr(
+	// 		efa_mr->domain->ibv_pd,
+	// 		mr_attr->dmabuf->offset,
+	// 		mr_attr->dmabuf->len,
+	// 		(uintptr_t) mr_attr->dmabuf->base_addr + mr_attr->dmabuf->offset,
+	// 		mr_attr->dmabuf->fd,
+	// 		access
+	// 	);
 
 	if (efa_mr_is_synapseai(efa_mr)) {
 		ret = ofi_hmem_get_dmabuf_fd(efa_mr->peer.iface,
@@ -544,7 +544,7 @@ static struct ibv_mr *efa_mr_reg_ibv_mr(struct efa_mr *efa_mr, struct fi_mr_attr
 	 * TODO: need such fallback for cuda as well when
 	 * FI_CUDA_API_PERMITTED is true
 	 */
-	if (efa_mr_is_neuron(efa_mr)) {
+	if (efa_mr_is_neuron(efa_mr) || efa_mr_is_cuda(efa_mr)) {
 		ret = ofi_hmem_get_dmabuf_fd(
 				efa_mr->peer.iface,
 				mr_attr->mr_iov->iov_base,
@@ -559,6 +559,13 @@ static struct ibv_mr *efa_mr_reg_ibv_mr(struct efa_mr *efa_mr, struct fi_mr_attr
 					mr_attr->mr_iov->iov_len,
 					(uint64_t)mr_attr->mr_iov->iov_base,
 					dmabuf_fd, access);
+			EFA_WARN(FI_LOG_MR,
+				"efa_mr_reg_ibv_dmabuf_mr with dmabuf fd %d "
+				"offset: %ld, addr: %p, len: %zu\n",
+				dmabuf_fd, offset,
+				mr_attr->mr_iov->iov_base,
+				mr_attr->mr_iov->iov_len
+				);
 			(void) ofi_hmem_put_dmabuf_fd(efa_mr->peer.iface, dmabuf_fd);
 			return ibv_mr;
 		} else if (ret == -FI_EOPNOTSUPP) {
