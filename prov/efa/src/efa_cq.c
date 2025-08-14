@@ -349,6 +349,7 @@ const char *efa_cq_strerror(struct fid_cq *cq_fid, int prov_errno,
  * @param[in] cq EFA completion queue
  * @return 0 if ready to wait, -FI_EAGAIN if completions available
  */
+#if HAVE_EFA_CQ_NOTIFICATION
 int efa_cq_trywait(struct efa_cq *cq)
 {
 	struct ibv_cq *ibv_cq;
@@ -389,6 +390,11 @@ int efa_cq_trywait(struct efa_cq *cq)
 
 	return ofi_cirque_isempty(cq->util_cq.cirq) ? FI_SUCCESS : -FI_EAGAIN;
 }
+#else
+int efa_cq_trywait(struct efa_cq *cq) {
+	return -FI_EOPNOTSUPP;
+}
+#endif
 
 /**
  * @brief Poll for completion events with timeout.
@@ -401,6 +407,7 @@ int efa_cq_trywait(struct efa_cq *cq)
  * @param[in] timeout Timeout in milliseconds
  * @return 0 on success, -FI_EAGAIN on timeout, negative error code on failure
  */
+#if HAVE_EFA_CQ_NOTIFICATION
 int efa_poll_events(struct efa_cq *cq, int timeout)
 {
 	int ret, rc;
@@ -457,6 +464,12 @@ int efa_poll_events(struct efa_cq *cq, int timeout)
 
 	return ret;
 }
+#else
+int efa_poll_events(struct efa_cq *cq, int timeout)
+{
+	return -FI_EOPNOTSUPP;
+}
+#endif
 
 /**
  * @brief
@@ -588,9 +601,11 @@ int efa_cq_close(fid_t fid)
 	if (cq->ibv_cq.ibv_cq_ex) {
 		ibv_cq = ibv_cq_ex_to_cq(cq->ibv_cq.ibv_cq_ex);
 
+#if HAVE_EFA_CQ_NOTIFICATION
 		/* Acknowledge any outstanding CQ events */
 		if (ofi_atomic_get32(&cq->nevents))
 			ibv_ack_cq_events(ibv_cq, ofi_atomic_get32(&cq->nevents));
+#endif
 
 		ret = -ibv_destroy_cq(ibv_cq);
 		if (ret) {
@@ -608,6 +623,7 @@ int efa_cq_close(fid_t fid)
 	if (ret)
 		return ret;
 
+#if HAVE_EFA_CQ_NOTIFICATION
 	if (cq->ibv_cq.channel) {
 		ret = ibv_destroy_comp_channel(cq->ibv_cq.channel);
 		if (ret) {
@@ -616,6 +632,7 @@ int efa_cq_close(fid_t fid)
 			return -ret;
 		}
 	}
+#endif
 
 	free(cq);
 
@@ -737,10 +754,12 @@ err_destroy_ibv_cq:
 	if (cq->ibv_cq.ibv_cq_ex)
 		ibv_destroy_cq(ibv_cq_ex_to_cq(cq->ibv_cq.ibv_cq_ex));
 err_destroy_channel:
+#if HAVE_EFA_CQ_NOTIFICATION
 	if (cq->ibv_cq.channel) {
 		ibv_destroy_comp_channel(cq->ibv_cq.channel);
 		cq->ibv_cq.channel = NULL;
 	}
+#endif
 err_free_util_cq:
 	retv = ofi_cq_cleanup(&cq->util_cq);
 	if (retv)

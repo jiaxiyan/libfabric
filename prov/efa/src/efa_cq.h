@@ -110,6 +110,7 @@ void efa_ibv_cq_poll_list_remove(struct dlist_entry *poll_list, struct ofi_genlo
  * @param[in] ibv_ctx Pointer to ibv_context
  * @return Return 0 on success, error code otherwise
  */
+#if HAVE_EFA_CQ_NOTIFICATION
 static inline int efa_cq_create_comp_channel(struct efa_ibv_cq *ibv_cq,
 					     struct ibv_context *ibv_ctx)
 {
@@ -140,6 +141,13 @@ static inline int efa_cq_create_comp_channel(struct efa_ibv_cq *ibv_cq,
 
 	return FI_SUCCESS;
 }
+#else
+static inline int efa_cq_create_comp_channel(struct efa_ibv_cq *ibv_cq,
+					     struct ibv_context *ibv_ctx)
+{
+	return -FI_EOPNOTSUPP;
+}
+#endif
 
 /**
  * @brief Create ibv_cq_ex by calling ibv_create_cq_ex
