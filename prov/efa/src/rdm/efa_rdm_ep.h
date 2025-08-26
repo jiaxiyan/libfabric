@@ -125,6 +125,8 @@ struct efa_rdm_ep {
 
 	/* bufpool to hold the fi_addr->peer hashmap entries */
 	struct ofi_bufpool *peer_map_entry_pool;
+	/* bufpool for peer structs */
+	struct ofi_bufpool *peer_pool;
 
 #if ENABLE_DEBUG
 	/* tx/rx_entries waiting to receive data in
@@ -553,7 +555,7 @@ bool efa_rdm_ep_support_unsolicited_write_recv(struct efa_rdm_ep *ep)
 
 struct efa_rdm_ep_peer_map_entry {
 	fi_addr_t addr;
-	struct efa_rdm_peer peer;
+	struct efa_rdm_peer *peer;
 	UT_hash_handle hndl;
 };
 

@@ -61,7 +61,7 @@ efa_rdm_ep_peer_map_lookup(struct efa_rdm_ep_peer_map_entry **peer_map,
 
 	HASH_FIND(hndl, *peer_map, &addr, sizeof(addr), map_entry);
 
-	return map_entry ? &map_entry->peer : NULL;
+	return map_entry ? map_entry->peer : NULL;
 }
 
 void efa_rdm_ep_peer_map_remove(struct efa_rdm_ep_peer_map_entry **peer_map,
@@ -90,24 +90,34 @@ efa_rdm_ep_get_peer_impl(struct efa_rdm_ep *ep, struct efa_rdm_ep_peer_map_entry
 		return peer;
 
 	EFA_INFO(FI_LOG_EP_DATA, "Creating peer for addr %lu\n", addr);
+
+	/* Allocate peer separately for better cache locality */
+	peer = (struct efa_rdm_peer *) ofi_buf_alloc(ep->peer_pool);
+	if (OFI_UNLIKELY(!peer)) {
+		EFA_WARN(FI_LOG_EP_DATA, "Failed to allocate peer struct\n");
+		return NULL;
+	}
+	efa_rdm_peer_construct(peer, ep, conn);
+
 	map_entry = ofi_buf_alloc(ep->peer_map_entry_pool);
 	if (OFI_UNLIKELY(!map_entry)) {
 		EFA_WARN(FI_LOG_EP_DATA,
 			"Map entries for fi_addr to peer mapping exhausted.\n");
+		ofi_buf_free(peer);
 		return NULL;
 	}
 
-	memset(map_entry, 0, sizeof(*map_entry));
-
 	map_entry->addr = addr;
-
-	efa_rdm_peer_construct(&map_entry->peer, ep, conn);
+	map_entry->peer = peer;
 
 	err = efa_rdm_ep_peer_map_insert(peer_map, addr, map_entry);
-	if (err)
+	if (err) {
+		ofi_buf_free(peer);
+		ofi_buf_free(map_entry);
 		return NULL;
+	}
 
-	return &map_entry->peer;
+	return peer;
 }
 
 /**
@@ -151,7 +161,7 @@ void efa_rdm_ep_peer_map_implicit_to_explicit(struct efa_rdm_ep *ep,
 
 	HASH_FIND(hndl, ep->fi_addr_to_peer_map_implicit, &implicit_fi_addr, sizeof(implicit_fi_addr), map_entry);
 	assert(map_entry);
-	assert(peer == &map_entry->peer);
+	assert(peer == map_entry->peer);
 	assert(implicit_fi_addr == map_entry->addr);
 
 	HASH_DELETE(hndl, ep->fi_addr_to_peer_map_implicit, map_entry);

@@ -237,9 +237,25 @@ int efa_rdm_ep_create_buffer_pools(struct efa_rdm_ep *ep)
 	ret = ofi_bufpool_create(&ep->peer_map_entry_pool,
 				 sizeof(struct efa_rdm_ep_peer_map_entry),
 				 EFA_RDM_BUFPOOL_ALIGNMENT, 0, /* no limit to max_cnt */
-				 EFA_RDM_EP_MIN_PEER_POOL_SIZE,
+				 EFA_MIN_AV_SIZE,
 				 /* Don't track usage, because endpoint can be closed without removing entries from AV */
 				 OFI_BUFPOOL_NO_TRACK);
+	if (ret)
+		goto err_free;
+
+	
+	struct ofi_bufpool_attr rdm_peer_pool_attr = {
+			.size = sizeof(struct efa_rdm_peer),
+			.alignment = 16,
+			.chunk_cnt = EFA_MIN_AV_SIZE,
+			.max_cnt = 0,
+			/* Don't track buffer use because user can close
+			 * the AV without removing addresses */
+			.flags = OFI_BUFPOOL_NO_TRACK,
+		};
+
+	ret = ofi_bufpool_create_attr(&rdm_peer_pool_attr,
+					      &ep->peer_pool);
 	if (ret)
 		goto err_free;
 
@@ -275,6 +291,9 @@ err_free:
 
 	if (ep->efa_tx_pkt_pool)
 		ofi_bufpool_destroy(ep->efa_tx_pkt_pool);
+
+	if (ep->peer_pool)
+		ofi_bufpool_destroy(ep->peer_pool);
 
 	if (ep->peer_map_entry_pool)
 		ofi_bufpool_destroy(ep->peer_map_entry_pool);
@@ -783,6 +802,9 @@ static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep)
 
 	if (efa_rdm_ep->rx_atomrsp_pool)
 		ofi_bufpool_destroy(efa_rdm_ep->rx_atomrsp_pool);
+
+	if (efa_rdm_ep->peer_pool)
+		ofi_bufpool_destroy(efa_rdm_ep->peer_pool);
 
 	if (efa_rdm_ep->peer_map_entry_pool)
 		ofi_bufpool_destroy(efa_rdm_ep->peer_map_entry_pool);
