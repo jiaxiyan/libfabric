@@ -84,6 +84,7 @@ struct efa_av {
 	struct efa_cur_reverse_av *cur_reverse_av;
 	struct efa_prv_reverse_av *prv_reverse_av;
 	struct util_av util_av;
+	struct ofi_bufpool *rdm_peer_pool;
 
 	/* implicit AV is used when receiving messages from peers not explicity
 	 * inserted by the application
