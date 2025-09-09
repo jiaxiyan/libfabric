@@ -4,6 +4,13 @@
 #include "efa.h"
 #include "efa_prov_info.h"
 
+/* External declarations for util functions */
+extern struct dlist_entry fabric_list;
+extern struct ofi_common_locks common_locks;
+extern int util_match_fabric(struct dlist_entry *item, const void *arg);
+extern int util_find_domain(struct dlist_entry *item, const void *arg);
+
+
 /**
  * @brief set the desc_addr field of user info
  *
@@ -397,6 +404,69 @@ int efa_user_info_alter_direct(int version, struct fi_info *info, const struct f
 }
 
 /**
+ * @brief find an opened fabric instance by name
+ *
+ * This function searches the global util fabric list for a fabric with the given name.
+ * It follows the same pattern as util_getinfo.
+ *
+ * @param	fabric_name[in]	name of the fabric to search for
+ * @return	pointer to opened fabric instance if found, NULL otherwise
+ */
+static
+struct efa_fabric *efa_find_opened_fabric_by_name(const char *fabric_name)
+{
+	struct util_fabric *util_fabric;
+	struct dlist_entry *item;
+	struct util_fabric_info fabric_info;
+	
+	if (!fabric_name)
+		return NULL;
+
+	fabric_info.name = fabric_name;
+	fabric_info.prov = efa_util_prov.prov;
+
+	pthread_mutex_lock(&common_locks.util_fabric_lock);
+	item = dlist_find_first_match(&fabric_list, util_match_fabric, &fabric_info);
+	pthread_mutex_unlock(&common_locks.util_fabric_lock);
+
+	if (!item)
+		return NULL;
+
+	util_fabric = container_of(item, struct util_fabric, list_entry);
+	return container_of(util_fabric, struct efa_fabric, util_fabric);
+}
+
+/**
+ * @brief find an opened domain instance within a specific fabric using util_find_domain
+ *
+ * This function searches for a domain within a specific fabric's domain list.
+ * It reuses the existing util_find_domain function.
+ *
+ * @param	fabric[in]	fabric to search within
+ * @param	info[in]	fi_info containing domain search criteria
+ * @return	pointer to opened domain instance if found, NULL otherwise
+ */
+static
+struct fid_domain *efa_find_opened_domain_by_fabric_and_info(struct efa_fabric *fabric, const struct fi_info *info)
+{
+	struct util_domain *util_domain;
+	struct dlist_entry *item;
+
+	if (!fabric || !info)
+		return NULL;
+
+	ofi_mutex_lock(&fabric->util_fabric.lock);
+	item = dlist_find_first_match(&fabric->util_fabric.domain_list, util_find_domain, info);
+	ofi_mutex_unlock(&fabric->util_fabric.lock);
+
+	if (!item)
+		return NULL;
+
+	util_domain = container_of(item, struct util_domain, list_entry);
+	return &util_domain->domain_fid;
+}
+
+/**
  * @brief get a list of fi_info objects the fit user's requirements
  *
  * @param	node[in]	node from user's call to fi_getinfo()
@@ -414,6 +484,7 @@ int efa_get_user_info(uint32_t version, const char *node,
 {
 	const struct fi_info *prov_info;
 	struct fi_info *dupinfo, *tail;
+	struct fid_domain *opened_domain;
 	int ret;
 
 	ret = efa_user_info_check_hints_addr(node, service, flags, hints);
@@ -476,6 +547,36 @@ int efa_get_user_info(uint32_t version, const char *node,
 		}
 
 		ofi_alter_info(dupinfo, hints, version);
+
+
+		/* Set fabric and domain field to opened instances if available and not already set
+		 * This follows the same pattern as util_getinfo:
+		 * 1. First find fabric by name
+		 * 2. Then find domain within that fabric 
+		 * 3. Only set domain if it belongs to the correct fabric
+		 */
+		if (!dupinfo->fabric_attr->fabric && dupinfo->fabric_attr->name) {
+			struct efa_fabric *opened_fabric;
+			EFA_WARN(FI_LOG_CORE,
+					"checking fabric %s\n", dupinfo->fabric_attr->name);
+			opened_fabric = efa_find_opened_fabric_by_name(dupinfo->fabric_attr->name);
+			if (opened_fabric) {
+				EFA_WARN(FI_LOG_CORE, "Reusing opened fabric %s\n", dupinfo->fabric_attr->name);
+				dupinfo->fabric_attr->fabric = &opened_fabric->util_fabric.fabric_fid;
+				
+				if (!dupinfo->domain_attr->domain && dupinfo->domain_attr->name) {
+					EFA_WARN(FI_LOG_CORE,
+					"checking domain_attr name %s\n", dupinfo->domain_attr->name);
+					opened_domain = efa_find_opened_domain_by_fabric_and_info(
+						opened_fabric, dupinfo);
+					if (opened_domain) {
+						EFA_WARN(FI_LOG_CORE, "Reusing opened domain %s\n", dupinfo->domain_attr->name);
+						dupinfo->domain_attr->domain = opened_domain;
+					}
+				}
+			}
+		}
+
 
 		if (!*info)
 			*info = dupinfo;

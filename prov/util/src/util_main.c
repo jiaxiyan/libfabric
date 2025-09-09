@@ -37,7 +37,7 @@
 #include <ofi_util.h>
 #include <ofi.h>
 
-static DEFINE_LIST(fabric_list);
+DEFINE_LIST(fabric_list);
 extern struct ofi_common_locks common_locks;
 
 void ofi_fabric_insert(struct util_fabric *fabric)
@@ -47,7 +47,7 @@ void ofi_fabric_insert(struct util_fabric *fabric)
 	pthread_mutex_unlock(&common_locks.util_fabric_lock);
 }
 
-static int util_match_fabric(struct dlist_entry *item, const void *arg)
+int util_match_fabric(struct dlist_entry *item, const void *arg)
 {
 	struct util_fabric *fabric;
 	struct util_fabric_info *fabric_info = (struct util_fabric_info *)arg;
@@ -151,7 +151,7 @@ void fid_list_remove2(struct dlist_entry *fid_list, struct ofi_genlock *lock,
 	}
 }
 
-static int util_find_domain(struct dlist_entry *item, const void *arg)
+int util_find_domain(struct dlist_entry *item, const void *arg)
 {
 	const struct util_domain *domain;
 	const struct fi_info *info = arg;
