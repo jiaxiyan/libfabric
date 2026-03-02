@@ -156,6 +156,7 @@ static void efa_cq_handle_tx_completion(struct efa_base_ep *base_ep,
 					struct fi_cq_tagged_entry *cq_entry)
 {
 	struct util_cq *tx_cq = base_ep->util_ep.tx_cq;
+	struct efa_context *efa_context;
 	int ret = 0;
 	struct ibv_cq_ex *ibv_cq_ex = ibv_cq->ibv_cq_ex;
 
@@ -164,6 +165,9 @@ static void efa_cq_handle_tx_completion(struct efa_base_ep *base_ep,
 		return;
 
 	efa_tracepoint(handle_tx_completion, ibv_cq_ex->wr_id);
+
+	efa_context = (struct efa_context *)ibv_cq_ex->wr_id;
+	efa_mr_ref_dec(efa_context->desc, efa_context->iov_count);
 
 	/* TX completions should not send peer address to util_cq */
 	if (base_ep->util_ep.caps & FI_SOURCE)
@@ -197,6 +201,7 @@ static void efa_cq_handle_rx_completion(struct efa_base_ep *base_ep,
 {
 	struct util_cq *rx_cq = base_ep->util_ep.rx_cq;
 	struct ibv_cq_ex *ibv_cq_ex = ibv_cq->ibv_cq_ex;
+	struct efa_context *efa_context;
 
 	fi_addr_t src_addr;
 	int ret = 0;
@@ -206,6 +211,9 @@ static void efa_cq_handle_rx_completion(struct efa_base_ep *base_ep,
 		return;
 
 	efa_tracepoint(handle_rx_completion, ibv_cq_ex->wr_id);
+
+	efa_context = (struct efa_context *)ibv_cq_ex->wr_id;
+	efa_mr_ref_dec(efa_context->desc, efa_context->iov_count);
 
 	if (base_ep->util_ep.caps & FI_SOURCE) {
 		src_addr = efa_av_reverse_lookup(base_ep->av,
@@ -810,6 +818,10 @@ ssize_t efa_cq_readfrom(struct fid_cq *cq_fid, void *buf, size_t count,
 		if ((!efa_cq_wc_is_unsolicited(ibv_cq) && ibv_cq->ibv_cq_ex->wr_id ) || opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
 			efa_tracepoint(handle_completion, ibv_cq->ibv_cq_ex->wr_id, opcode);
 			efa_cq->read_entry(ibv_cq, (void *)((uintptr_t) buf + num_cqe * efa_cq->entry_size), opcode);
+			if (ibv_cq->ibv_cq_ex->wr_id) {
+				struct efa_context *efa_context = (struct efa_context *)ibv_cq->ibv_cq_ex->wr_id;
+				efa_mr_ref_dec(efa_context->desc, efa_context->iov_count);
+			}
 			if (src_addr)
 				src_addr[num_cqe] = efa_cq_get_src_addr(ibv_cq, opcode);
 			num_cqe++;

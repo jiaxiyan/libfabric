@@ -67,7 +67,8 @@ static inline ssize_t efa_rma_post_read(struct efa_base_ep *base_ep,
 
 	/* Prepare work request ID */
 	wr_id = (uintptr_t) efa_fill_context(
-		msg->context, msg->addr, flags, FI_RMA | FI_READ);
+		msg->context, msg->addr, flags, FI_RMA | FI_READ,
+		msg->desc, msg->iov_count);
 
 	/* Prepare SGE list */
 	for (i = 0; i < msg->iov_count; ++i) {
@@ -83,6 +84,7 @@ static inline ssize_t efa_rma_post_read(struct efa_base_ep *base_ep,
 		efa_mr = (struct efa_mr *)msg->desc[i];
 		sge_list[i].lkey = efa_mr->ibv_mr->lkey;
 	}
+	efa_mr_ref_inc(msg->desc, msg->iov_count);
 
 	conn = efa_av_addr_to_conn(base_ep->av, msg->addr);
 	assert(conn && conn->ep_addr);
@@ -207,7 +209,8 @@ static inline ssize_t efa_rma_post_write(struct efa_base_ep *base_ep,
 
 	/* Prepare work request ID */
 	wr_id = (uintptr_t) efa_fill_context(
-		msg->context, msg->addr, flags, FI_RMA | FI_WRITE);
+		msg->context, msg->addr, flags, FI_RMA | FI_WRITE,
+		msg->desc, msg->iov_count);
 
 	/* Prepare SGE list */
 	for (i = 0; i < msg->iov_count; ++i) {
@@ -222,6 +225,7 @@ static inline ssize_t efa_rma_post_write(struct efa_base_ep *base_ep,
 		}
 		sge_list[i].lkey = ((struct efa_mr *)msg->desc[i])->ibv_mr->lkey;
 	}
+	efa_mr_ref_inc(msg->desc, msg->iov_count);
 
 	conn = efa_av_addr_to_conn(base_ep->av, msg->addr);
 	assert(conn && conn->ep_addr);
