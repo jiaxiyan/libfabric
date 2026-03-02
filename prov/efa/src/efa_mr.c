@@ -438,6 +438,7 @@ static int efa_mr_close(fid_t fid)
 {
 	struct efa_mr *efa_mr;
 	int ret, err;
+	int32_t ref;
 
 	efa_mr = container_of(fid, struct efa_mr, mr_fid.fid);
 
@@ -454,6 +455,16 @@ static int efa_mr_close(fid_t fid)
 	ret = efa_mr_dereg_impl(efa_mr);
 	if (ret)
 		EFA_WARN(FI_LOG_MR, "Unable to close MR\n");
+
+	ref = ofi_atomic_get32(&efa_mr->ref);
+	if (ref > 0)
+		EFA_WARN(FI_LOG_MR,
+			 "fi_close called on MR %p (key: %ld) with %d "
+			 "outstanding references. "
+			 "This may indicate the application is closing "
+			 "an MR while operations are still in flight.\n",
+			 efa_mr, efa_mr->mr_fid.key, ref);
+
 	free(efa_mr);
 	return ret;
 }
@@ -1016,6 +1027,8 @@ static int efa_mr_reg_impl(struct efa_mr *efa_mr, uint64_t flags, const struct f
 
 	efa_mr->inserted_to_mr_map = true;
 
+	ofi_atomic_initialize32(&efa_mr->ref, 0);
+
 	return 0;
 }
 
@@ -1170,3 +1183,57 @@ struct fi_ops_mr efa_domain_mr_ops = {
 	.regv = efa_mr_regv,
 	.regattr = efa_mr_regattr,
 };
+
+/**
+ * @brief Increment the reference count of MRs (when tracking is enabled)
+ *
+ * This function should be called when an operation starts referencing the MRs.
+ *
+ * @param[in]	desc	Array of MR descriptors (void pointers to efa_mr)
+ * @param[in]	count	Number of descriptors in the array
+ */
+void efa_mr_ref_inc(void **desc, size_t count)
+{
+	size_t i;
+	int32_t ref;
+	struct efa_mr *mr;
+
+	for (i = 0; i < count; i++) {
+		if (desc[i]) {
+			mr = desc[i];
+			ref = ofi_atomic_inc32(&mr->ref);
+			EFA_INFO(FI_LOG_MR,
+				 "MR %p (key: %ld) ref incremented to %d\n",
+				 mr, mr->mr_fid.key, ref);
+		}
+	}
+}
+
+/**
+ * @brief Decrement the reference count of MRs (when tracking is enabled)
+ *
+ * This function should be called when an operation completes and no longer
+ * references the MRs.
+ *
+ * @param[in]	desc	Array of MR descriptors (void pointers to efa_mr)
+ * @param[in]	count	Number of descriptors in the array
+ */
+void efa_mr_ref_dec(void **desc, size_t count)
+{
+	size_t i;
+	int32_t ref;
+	struct efa_mr *mr;
+
+	if (!desc)
+		return;
+
+	for (i = 0; i < count; i++) {
+		if (desc[i]) {
+			mr = desc[i];
+			ref = ofi_atomic_dec32(&mr->ref);
+			EFA_INFO(FI_LOG_MR,
+				 "MR %p (key: %ld) ref decremented to %d\n",
+				 mr, mr->mr_fid.key, ref);
+		}
+	}
+}

@@ -177,6 +177,9 @@ ssize_t efa_rdm_atomic_generic_efa(struct efa_rdm_ep *efa_rdm_ep,
 	if (OFI_UNLIKELY(err)) {
 		efa_rdm_txe_release(txe);
 		peer->next_msg_id--;
+	} else {
+		if (msg->desc)
+			efa_mr_ref_inc(msg->desc, msg->iov_count);
 	}
 
 out:

@@ -19,6 +19,7 @@
 #include "efa_rdm_pke_req.h"
 
 #include "efa_rdm_tracepoint.h"
+#include "efa_mr.h"
 
 /**
  * This file define the msg ops functions.
@@ -200,6 +201,9 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, struct efa_rdm_peer *pee
 	if (OFI_UNLIKELY(err)) {
 		efa_rdm_txe_release(txe);
 		peer->next_msg_id--;
+	} else {
+		if (msg->desc)
+			efa_mr_ref_inc(msg->desc, msg->iov_count);
 	}
 
 out:
@@ -964,7 +968,8 @@ ssize_t efa_rdm_msg_generic_recv(struct efa_rdm_ep *ep, const struct fi_msg *msg
 		ret = util_srx_generic_recv(ep->peer_srx_ep, msg->msg_iov, msg->desc,
 				            msg->iov_count, msg->addr, msg->context, flags);
 	}
-
+	if (!ret)
+		efa_mr_ref_inc(msg->desc, msg->iov_count);
 out:
 	efa_perfset_end(ep, perf_efa_recv);
 	return ret;

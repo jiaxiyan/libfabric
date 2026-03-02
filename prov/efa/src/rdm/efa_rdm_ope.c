@@ -12,6 +12,7 @@
 #include "efa_rdm_tracepoint.h"
 #include "efa_rdm_pke_req.h"
 #include "efa_rdm_pkt_type.h"
+#include "efa_mr.h"
 
 void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 			   struct efa_rdm_ep *ep,
@@ -678,6 +679,7 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	}
 
 	efa_cntr_report_error(&ep->base_ep.util_ep, err_entry.flags);
+	efa_mr_ref_dec(rxe->desc, rxe->iov_count);
 	write_cq_err = ofi_cq_write_error(util_cq, &err_entry);
 	if (write_cq_err) {
 		EFA_WARN(FI_LOG_CQ, "Failed to write CQ error entry for rxe err: %d, message: %s (%d)\n",
@@ -804,6 +806,7 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	}
 
 	efa_cntr_report_error(&ep->base_ep.util_ep, txe->cq_entry.flags);
+	efa_mr_ref_dec(txe->desc, txe->iov_count);
 	write_cq_err = ofi_cq_write_error(util_cq, &err_entry);
 	if (write_cq_err) {
 		EFA_WARN(FI_LOG_CQ, "Failed to write CQ error entry for txe err: %d, message: %s (%d)\n",
@@ -845,6 +848,8 @@ void efa_rdm_rxe_report_completion(struct efa_rdm_ope *rxe)
 	struct util_cq *rx_cq = ep->base_ep.util_ep.rx_cq;
 	int ret = 0;
 	uint64_t cq_flags;
+
+	efa_mr_ref_dec(rxe->desc, rxe->iov_count);
 
 	cq_flags = (ep->base_ep.util_ep.rx_msg_flags == FI_COMPLETION) ? 0 : FI_SELECTIVE_COMPLETION;
 	if (OFI_UNLIKELY(rxe->cq_entry.len < rxe->total_len)) {
@@ -982,6 +987,7 @@ void efa_rdm_txe_report_completion(struct efa_rdm_ope *txe)
 	int ret;
 
 	assert(txe->type == EFA_RDM_TXE);
+	efa_mr_ref_dec(txe->desc, txe->iov_count);
 	if (efa_rdm_txe_should_update_cq(txe)) {
 		EFA_DBG(FI_LOG_CQ,
 		       "Writing send completion for txe to peer: %" PRIu64
@@ -1077,6 +1083,7 @@ void efa_rdm_ope_handle_send_completed(struct efa_rdm_ope *ope)
 		} else {
 			if (!(ope->fi_flags & EFA_RDM_TXE_NO_COUNTER))
 				efa_cntr_report_tx_completion(&ep->base_ep.util_ep, ope->cq_entry.flags);
+			efa_mr_ref_dec(ope->desc, ope->iov_count);
 		}
 
 	} else {
@@ -1125,8 +1132,11 @@ void efa_rdm_ope_handle_recv_completed(struct efa_rdm_ope *ope)
 		/*
 		 * For write, only write RX completion when REMOTE_CQ_DATA is on
 		 */
-		if (ope->cq_entry.flags & FI_REMOTE_CQ_DATA)
+		if (ope->cq_entry.flags & FI_REMOTE_CQ_DATA) {
 			efa_rdm_rxe_report_completion(ope);
+		} else {
+			efa_mr_ref_dec(ope->desc, ope->iov_count);
+		}
 	} else if (ope->cq_entry.flags & FI_READ) {
 		/* This ope is part of the for emulated read protocol,
 		 * created on the read requester side.
@@ -1155,6 +1165,7 @@ void efa_rdm_ope_handle_recv_completed(struct efa_rdm_ope *ope)
 			efa_rdm_txe_report_completion(txe);
 		} else {
 			efa_cntr_report_tx_completion(&txe->ep->base_ep.util_ep, txe->cq_entry.flags);
+			efa_mr_ref_dec(txe->desc, txe->iov_count);
 		}
 	} else {
 		assert(ope->type == EFA_RDM_RXE);
