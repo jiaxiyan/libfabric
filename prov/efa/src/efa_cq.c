@@ -428,6 +428,26 @@ int efa_cq_poll_ibv_cq(ssize_t cqe_to_process, struct efa_ibv_cq *ibv_cq)
 	return err;
 }
 
+/**
+ * @brief Drain device CQ to reclaim WQ request IDs without processing CQEs.
+ *
+ * This is a lightweight alternative to efa_cq_poll_ibv_cq() for use by
+ * hardware counters. It only calls start_poll/next_poll/end_poll, which
+ * triggers efa_wq_put_dev_req_id() to return WQ entries, but skips all
+ * CQE examination, util_cq writes, and software counter updates.
+ *
+ * @param[in]	ibv_cq	The ibv CQ to drain
+ */
+void efa_cq_drain_ibv_cq(struct efa_ibv_cq *ibv_cq)
+{
+	efa_cq_start_poll(ibv_cq);
+
+	while (efa_cq_wc_available(ibv_cq))
+		efa_cq_next_poll(ibv_cq);
+
+	efa_cq_end_poll(ibv_cq);
+}
+
 const char *efa_cq_strerror(struct fid_cq *cq_fid, int prov_errno,
 			    const void *err_data, char *buf, size_t len)
 {

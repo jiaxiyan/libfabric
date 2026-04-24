@@ -261,6 +261,7 @@ int efa_cq_signal_init(struct efa_cq *cq);
 void efa_cq_signal_fini(struct efa_cq *cq);
 void efa_cq_ack_events(struct efa_cq *cq);
 int efa_cq_destroy_comp_channel(struct efa_cq *cq);
+void efa_cq_drain_ibv_cq(struct efa_ibv_cq *ibv_cq);
 
 /**
  * @brief Invalidate stale cur_wq pointer on a CQ if it references the given QP

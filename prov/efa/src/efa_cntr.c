@@ -6,6 +6,7 @@
 #include "efa.h"
 #include "efa_cntr.h"
 #include "efa_cq.h"
+#include "efa_hw_cntr.h"
 
 int efa_cntr_wait(struct fid_cntr *cntr_fid, uint64_t threshold, int timeout)
 {
@@ -171,6 +172,14 @@ int efa_cntr_open(struct fid_domain *domain, struct fi_cntr_attr *attr,
 	cntr = calloc(1, sizeof(*cntr));
 	if (!cntr)
 		return -FI_ENOMEM;
+
+#if HAVE_EFADV_CREATE_COMP_CNTR
+	struct efadv_comp_cntr_init_attr cc_attr = {0};
+	ret = efa_hw_cntr_open(domain, attr, cntr, cntr_fid, context, &cc_attr);
+	if (!ret)
+		return FI_SUCCESS;
+#endif
+	/* Fall back if hw cntr open fails */
 
 	ret = efa_cntr_construct(cntr, domain, attr, efa_cntr_progress, context);
 	if (ret) {
