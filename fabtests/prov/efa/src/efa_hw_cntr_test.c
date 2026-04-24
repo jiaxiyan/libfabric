@@ -29,6 +29,8 @@
  * EFA hardware counter test.
  *
  * Runs MSG pingpong or RMA write.
+ * Use --external-mem to pass user-allocated memory for hw counters
+ * in cntr_open_ext.
  */
 
 #include <stdio.h>
@@ -39,6 +41,12 @@
 #include <rdma/fi_ext_efa.h>
 #include <shared.h>
 #include "benchmarks/benchmark_shared.h"
+
+static bool use_ext_mem;
+
+enum {
+	LONG_OPT_EXTERNAL_MEM,
+};
 
 static int open_cntr(struct fid_cntr **cntr)
 {
@@ -52,6 +60,23 @@ static int open_cntr(struct fid_cntr **cntr)
 	if (!ret) {
 		attr.events = FI_CNTR_EVENTS_COMP;
 		attr.wait_obj = FI_WAIT_UNSPEC;
+
+		if (use_ext_mem) {
+			efa_attr.comp_cntr_ext_mem.type = FI_EFA_MEMORY_LOCATION_VA;
+			efa_attr.comp_cntr_ext_mem.ptr = calloc(1, sizeof(uint64_t));
+			if (!efa_attr.comp_cntr_ext_mem.ptr)
+				return -FI_ENOMEM;
+
+			efa_attr.err_cntr_ext_mem.type = FI_EFA_MEMORY_LOCATION_VA;
+			efa_attr.err_cntr_ext_mem.ptr = calloc(1, sizeof(uint64_t));
+			if (!efa_attr.err_cntr_ext_mem.ptr) {
+				free(efa_attr.comp_cntr_ext_mem.ptr);
+				return -FI_ENOMEM;
+			}
+
+			efa_attr.flags = FI_EFA_COMP_CNTR_INIT_WITH_COMP_EXTERNAL_MEM |
+					 FI_EFA_COMP_CNTR_INIT_WITH_ERR_EXTERNAL_MEM;
+		}
 
 		ret = gda_ops->cntr_open_ext(domain, &attr, cntr, NULL,
 					     &efa_attr);
@@ -259,9 +284,17 @@ int main(int argc, char **argv)
 	if (!hints)
 		return EXIT_FAILURE;
 
-	while ((op = getopt(argc, argv, "h" CS_OPTS INFO_OPTS BENCHMARK_OPTS
-			    API_OPTS)) != -1) {
+	int lopt_idx = 0;
+	struct option long_opts[] = {
+		{"external-mem", no_argument, NULL, LONG_OPT_EXTERNAL_MEM},
+		{0, 0, 0, 0}
+	};
+	while ((op = getopt_long(argc, argv, "h" CS_OPTS INFO_OPTS BENCHMARK_OPTS
+				 API_OPTS, long_opts, &lopt_idx)) != -1) {
 		switch (op) {
+		case LONG_OPT_EXTERNAL_MEM:
+			use_ext_mem = true;
+			break;
 		default:
 			if (!ft_parse_long_opts(op, optarg))
 				continue;
@@ -279,6 +312,8 @@ int main(int argc, char **argv)
 			ft_benchmark_usage();
 			FT_PRINT_OPTS_USAGE("-o <op>",
 				"op: msg|write (default: msg)");
+			FT_PRINT_OPTS_USAGE("--external-mem",
+				"use external user memory for hw counters");
 			ft_longopts_usage();
 			return EXIT_FAILURE;
 		}
