@@ -1,6 +1,6 @@
 import os
 import pytest
-from common import ClientServerTest
+from common import ClientServerTest, has_cuda
 
 def _skip_if_not_built(cmdline_args):
     binpath = cmdline_args.binpath or ""
@@ -56,4 +56,40 @@ def test_efa_hw_cntr_rma_write_ext_mem(cmdline_args, direct_rma_size, rma_fabric
                             message_size=direct_rma_size,
                             fabric=rma_fabric,
                             additional_env="FI_EFA_USE_HW_CNTR=1")
+    test.run()
+
+
+@pytest.mark.functional
+@pytest.mark.cuda_memory
+def test_efa_hw_cntr_pingpong_ext_mem_cuda(cmdline_args, direct_message_size, fabric):
+    _skip_if_not_built(cmdline_args)
+    if fabric != "efa-direct":
+        pytest.skip("hw_cntr is only in efa-direct")
+    if not cmdline_args.do_dmabuf_reg_for_hmem:
+        pytest.skip("DMABUF is required for cuda ext_mem counters")
+    if not has_cuda(cmdline_args.client_id) or not has_cuda(cmdline_args.server_id):
+        pytest.skip("Client and server both need a cuda device")
+    test = ClientServerTest(cmdline_args, "fi_efa_hw_cntr --external-mem",
+                            iteration_type="short",
+                            message_size=direct_message_size,
+                            memory_type="cuda_to_cuda",
+                            fabric=fabric, additional_env="FI_EFA_USE_HW_CNTR=1")
+    test.run()
+
+
+@pytest.mark.functional
+@pytest.mark.cuda_memory
+def test_efa_hw_cntr_rma_write_ext_mem_cuda(cmdline_args, direct_rma_size, rma_fabric):
+    _skip_if_not_built(cmdline_args)
+    if rma_fabric != "efa-direct":
+        pytest.skip("hw_cntr is only in efa-direct")
+    if not cmdline_args.do_dmabuf_reg_for_hmem:
+        pytest.skip("DMABUF is required for cuda ext_mem counters")
+    if not has_cuda(cmdline_args.client_id) or not has_cuda(cmdline_args.server_id):
+        pytest.skip("Client and server both need a cuda device")
+    test = ClientServerTest(cmdline_args, "fi_efa_hw_cntr --external-mem -o write",
+                            iteration_type="short",
+                            message_size=direct_rma_size,
+                            memory_type="cuda_to_cuda",
+                            fabric=rma_fabric, additional_env="FI_EFA_USE_HW_CNTR=1")
     test.run()
