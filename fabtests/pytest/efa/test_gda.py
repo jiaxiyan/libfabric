@@ -3,10 +3,7 @@ import pytest
 from common import ClientServerTest, has_cuda
 
 
-@pytest.mark.short
-@pytest.mark.functional
-@pytest.mark.cuda_memory
-def test_gda_send_recv(cmdline_args, direct_message_size, fabric):
+def _skip_if_gda_unavailable(cmdline_args, fabric):
     binpath = cmdline_args.binpath or ""
     if not os.path.exists(os.path.join(binpath, "fi_efa_gda")):
         pytest.skip("fi_efa_gda is not built")
@@ -20,9 +17,59 @@ def test_gda_send_recv(cmdline_args, direct_message_size, fabric):
     if fabric != "efa-direct":
         pytest.skip("GDA only works for efa-direct fabric")
 
+
+@pytest.mark.short
+@pytest.mark.functional
+@pytest.mark.cuda_memory
+def test_gda_send_recv(cmdline_args, direct_message_size, fabric):
+    _skip_if_gda_unavailable(cmdline_args, fabric)
+
     test = ClientServerTest(cmdline_args, "fi_efa_gda",
                             message_size=direct_message_size,
                             iteration_type="short",
                             memory_type="cuda_to_cuda",
-                            fabric=fabric)
+                            fabric=fabric,
+                            datacheck_type="with_datacheck")
+    test.run()
+
+
+@pytest.mark.short
+@pytest.mark.functional
+@pytest.mark.cuda_memory
+def test_gda_write_bw(cmdline_args, rma_fabric):
+    _skip_if_gda_unavailable(cmdline_args, rma_fabric)
+
+    test = ClientServerTest(cmdline_args, "fi_efa_gda -o write",
+                            iteration_type="short",
+                            memory_type="cuda_to_cuda",
+                            fabric=rma_fabric,
+                            datacheck_type="with_datacheck")
+    test.run()
+
+
+@pytest.mark.short
+@pytest.mark.functional
+@pytest.mark.cuda_memory
+def test_gda_writedata_bw(cmdline_args, rma_fabric):
+    _skip_if_gda_unavailable(cmdline_args, rma_fabric)
+
+    test = ClientServerTest(cmdline_args, "fi_efa_gda -o writedata",
+                            iteration_type="short",
+                            memory_type="cuda_to_cuda",
+                            fabric=rma_fabric,
+                            datacheck_type="with_datacheck")
+    test.run()
+
+
+@pytest.mark.short
+@pytest.mark.functional
+@pytest.mark.cuda_memory
+def test_gda_read_bw(cmdline_args, rma_fabric):
+    _skip_if_gda_unavailable(cmdline_args, rma_fabric)
+
+    test = ClientServerTest(cmdline_args, "fi_efa_gda -o read",
+                            iteration_type="short",
+                            memory_type="cuda_to_cuda",
+                            fabric=rma_fabric,
+                            datacheck_type="with_datacheck")
     test.run()
