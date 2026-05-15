@@ -34,6 +34,8 @@ __global__ void efagda_lat_send_kernel(
 	efa_cuda_qp *qp,
 	efa_cuda_cq *send_cq,
 	efa_cuda_cq *recv_cq,
+	volatile uint64_t *send_cntr_ptr,
+	volatile uint64_t *recv_cntr_ptr,
 	uint16_t ah,
 	uint16_t remote_qpn,
 	uint32_t remote_qkey,
@@ -45,7 +47,8 @@ __global__ void efagda_lat_send_kernel(
 	uint32_t send_lkey,
 	int iters,
 	int rx_depth,
-	int machine_type)
+	int machine_type,
+	long long timeout_cycles)
 {
 	int scnt = 0;
 	int rcnt = 0;
@@ -54,10 +57,18 @@ __global__ void efagda_lat_send_kernel(
 	__shared__ efa_cuda_qp local_qp;
 	__shared__ efa_cuda_cq local_send_cq;
 	__shared__ efa_cuda_cq local_recv_cq;
+	long long start;
+	uint64_t send_cntr_base = 0;
+	uint64_t recv_cntr_base = 0;
 
 	local_qp = *qp;
 	local_send_cq = *send_cq;
 	local_recv_cq = *recv_cq;
+
+	if (send_cntr_ptr)
+		send_cntr_base = *send_cntr_ptr;
+	if (recv_cntr_ptr)
+		recv_cntr_base = *recv_cntr_ptr;
 
 	/* Post initial receives */
 	for (int i = 0; i < rx_depth; i++) {
@@ -70,9 +81,24 @@ __global__ void efagda_lat_send_kernel(
 	while (scnt < iters || rcnt < iters) {
 		/* Poll for receive completion (except for first client send) */
 		if (rcnt < iters && !(scnt < 1 && machine_type == 1)) {
-			do {
-				cqe = efa_cuda_cq_poll(&local_recv_cq, 0);
-			} while (!cqe);
+			if (recv_cntr_ptr) {
+				start = clock64();
+				while (*recv_cntr_ptr < recv_cntr_base + (uint64_t)(rcnt + 1)) {
+					if (timeout_cycles >= 0 && clock64() - start > timeout_cycles) {
+						printf("recv hw cntr timeout at rcnt=%d, recv_cntr_ptr=%lu\n", rcnt, *recv_cntr_ptr);
+						return;
+					}
+				}
+			} else {
+				start = clock64();
+				do {
+					if (timeout_cycles >= 0 && clock64() - start > timeout_cycles) {
+						printf("recv cq poll timeout at rcnt=%d\n", rcnt);
+						return;
+					}
+					cqe = efa_cuda_cq_poll(&local_recv_cq, 0);
+				} while (!cqe);
+			}
 
 			rcnt++;
 			efa_cuda_cq_pop(&local_recv_cq, 1);
@@ -105,13 +131,28 @@ __global__ void efagda_lat_send_kernel(
 			efa_cuda_flush_sq_wrs(&local_qp);
 
 			/* Wait for send completion */
-			do {
-				cqe = efa_cuda_cq_poll(&local_send_cq, 0);
-			} while (!cqe);
+			if (send_cntr_ptr) {
+				start = clock64();
+				while (*send_cntr_ptr < send_cntr_base + (uint64_t)scnt) {
+					if (timeout_cycles >= 0 && clock64() - start > timeout_cycles) {
+						printf("send hw cntr timeout at scnt=%d, send_cntr_ptr=%lu\n", scnt, *send_cntr_ptr);
+						return;
+					}
+				}
+			} else {
+				start = clock64();
+				do {
+					if (timeout_cycles >= 0 && clock64() - start > timeout_cycles) {
+						printf("send cq poll timeout at scnt=%d\n", scnt);
+						return;
+					}
+					cqe = efa_cuda_cq_poll(&local_send_cq, 0);
+				} while (!cqe);
 
-			uint32_t err = efa_cuda_wc_read_vendor_err(cqe);
-			if (err)
-				printf("send comp err %d\n", err);
+				uint32_t err = efa_cuda_wc_read_vendor_err(cqe);
+				if (err)
+					printf("send comp err %d\n", err);
+			}
 			efa_cuda_cq_pop(&local_send_cq, 1);
 		}
 	}
@@ -124,6 +165,8 @@ __global__ void efagda_lat_send_kernel(
 int efagda_run_lat_send(struct efa_cuda_qp *qp,
 			struct efa_cuda_cq *send_cq,
 			struct efa_cuda_cq *recv_cq,
+			volatile uint64_t *send_cntr_ptr,
+			volatile uint64_t *recv_cntr_ptr,
 			uint16_t ah, uint16_t remote_qpn,
 			uint32_t remote_qkey,
 			uint64_t recv_addr, uint32_t recv_length,
@@ -131,15 +174,24 @@ int efagda_run_lat_send(struct efa_cuda_qp *qp,
 			uint64_t send_addr, uint32_t send_length,
 			uint32_t send_lkey,
 			int iters, int rx_depth, int is_client,
-			cudaStream_t stream)
+			int timeout_sec, cudaStream_t stream)
 {
 	cudaError_t err;
+	long long timeout_cycles = -1;
+
+	if (timeout_sec >= 0) {
+		int clock_khz;
+		cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0);
+		timeout_cycles = (long long)timeout_sec * (long long)clock_khz * 1000LL;
+	}
 
 	efagda_lat_send_kernel<<<1, 1, 0, stream>>>(
-		qp, send_cq, recv_cq, ah, remote_qpn, remote_qkey,
+		qp, send_cq, recv_cq,
+		send_cntr_ptr, recv_cntr_ptr,
+		ah, remote_qpn, remote_qkey,
 		recv_addr, recv_length, recv_lkey,
 		send_addr, send_length, send_lkey,
-		iters, rx_depth, is_client);
+		iters, rx_depth, is_client, timeout_cycles);
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -161,6 +213,7 @@ int efagda_run_lat_send(struct efa_cuda_qp *qp,
 __global__ void efagda_bw_kernel(
 	efa_cuda_qp *qp,
 	efa_cuda_cq *send_cq,
+	volatile uint64_t *send_cntr_ptr,
 	enum ibv_wr_opcode opcode,
 	uint64_t send_addr,
 	uint32_t send_length,
@@ -171,7 +224,8 @@ __global__ void efagda_bw_kernel(
 	uint64_t remote_addr,
 	uint32_t remote_rkey,
 	int iters,
-	int tx_depth)
+	int tx_depth,
+	long long timeout_cycles)
 {
 	int scnt = 0;
 	int ccnt = 0;
@@ -179,9 +233,15 @@ __global__ void efagda_bw_kernel(
 	struct efa_io_tx_wqe wr_buf;
 	__shared__ efa_cuda_qp local_qp;
 	__shared__ efa_cuda_cq local_send_cq;
+	long long start;
+	uint64_t cntr_base = 0;
 
 	local_qp = *qp;
 	local_send_cq = *send_cq;
+
+	if (send_cntr_ptr) {
+		cntr_base = *send_cntr_ptr;
+	}
 
 	while (scnt < iters || ccnt < iters) {
 		/* Post writes up to tx_depth */
@@ -227,13 +287,25 @@ __global__ void efagda_bw_kernel(
 		/* Poll completions */
 		while (ccnt < scnt && (scnt == iters ||
 		       (scnt - ccnt) >= tx_depth)) {
-			cqe = efa_cuda_cq_poll(&local_send_cq, 0);
-			if (cqe) {
-				if (((efa_io_cdesc_common *)cqe)->status != 0)
-					printf("bw comp err %d\n",
-					       ((efa_io_cdesc_common *)cqe)->status);
+			if (send_cntr_ptr) {
+				start = clock64();
+				while (*send_cntr_ptr < cntr_base + (uint64_t)(ccnt + 1)) {
+					if (timeout_cycles >= 0 && clock64() - start > timeout_cycles) {
+						printf("bw send hw cntr timeout at ccnt=%d, send_cntr_ptr=%lu\n", ccnt, *send_cntr_ptr);
+						return;
+					}
+				}
 				efa_cuda_cq_pop(&local_send_cq, 1);
 				ccnt++;
+			} else {
+				cqe = efa_cuda_cq_poll(&local_send_cq, 0);
+				if (cqe) {
+					if (((efa_io_cdesc_common *)cqe)->status != 0)
+						printf("bw comp err %d\n",
+						       ((efa_io_cdesc_common *)cqe)->status);
+					efa_cuda_cq_pop(&local_send_cq, 1);
+					ccnt++;
+				}
 			}
 		}
 	}
@@ -245,19 +317,26 @@ __global__ void efagda_bw_kernel(
 __global__ void efagda_bw_recv_kernel(
 	efa_cuda_qp *qp,
 	efa_cuda_cq *recv_cq,
+	volatile uint64_t *recv_cntr_ptr,
 	uint64_t recv_addr,
 	uint32_t recv_length,
 	uint32_t recv_lkey,
 	int iters,
-	int rx_depth)
+	int rx_depth,
+	long long timeout_cycles)
 {
 	int rcnt = 0;
 	void *cqe;
 	__shared__ efa_cuda_qp local_qp;
 	__shared__ efa_cuda_cq local_recv_cq;
+	long long start;
+	uint64_t cntr_base = 0;
 
 	local_qp = *qp;
 	local_recv_cq = *recv_cq;
+
+	if (recv_cntr_ptr)
+		cntr_base = *recv_cntr_ptr;
 
 	/* Post initial receives */
 	for (int i = 0; i < rx_depth; i++) {
@@ -268,13 +347,23 @@ __global__ void efagda_bw_recv_kernel(
 	efa_cuda_flush_rq_wrs(&local_qp);
 
 	while (rcnt < iters) {
-		do {
-			cqe = efa_cuda_cq_poll(&local_recv_cq, 0);
-		} while (!cqe);
+		if (recv_cntr_ptr) {
+			start = clock64();
+			while (*recv_cntr_ptr < cntr_base + (uint64_t)(rcnt + 1)) {
+				if (timeout_cycles >= 0 && clock64() - start > timeout_cycles) {
+					printf("bw recv hw cntr timeout at rcnt=%d, recv_cntr_ptr=%lu\n", rcnt, *recv_cntr_ptr);
+					return;
+				}
+			}
+		} else {
+			do {
+				cqe = efa_cuda_cq_poll(&local_recv_cq, 0);
+			} while (!cqe);
 
-		if (((efa_io_cdesc_common *)cqe)->status != 0)
-			printf("bw recv err %d\n",
-			       ((efa_io_cdesc_common *)cqe)->status);
+			if (((efa_io_cdesc_common *)cqe)->status != 0)
+				printf("bw recv err %d\n",
+				       ((efa_io_cdesc_common *)cqe)->status);
+		}
 
 		rcnt++;
 		efa_cuda_cq_pop(&local_recv_cq, 1);
@@ -294,21 +383,29 @@ __global__ void efagda_bw_recv_kernel(
 
 int efagda_run_bw(struct efa_cuda_qp *qp,
 		  struct efa_cuda_cq *send_cq,
+		  volatile uint64_t *send_cntr_ptr,
 		  enum ibv_wr_opcode opcode,
 		  uint64_t send_addr, uint32_t send_length, uint32_t send_lkey,
 		  uint16_t ah, uint32_t remote_qpn, uint32_t remote_qkey,
 		  uint64_t remote_addr, uint32_t remote_rkey,
 		  int iters, int tx_depth,
-		  cudaStream_t stream)
+		  int timeout_sec, cudaStream_t stream)
 {
 	cudaError_t err;
+	long long timeout_cycles = -1;
+
+	if (timeout_sec >= 0) {
+		int clock_khz;
+		cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0);
+		timeout_cycles = (long long)timeout_sec * (long long)clock_khz * 1000LL;
+	}
 
 	efagda_bw_kernel<<<1, 1, 0, stream>>>(
-		qp, send_cq, opcode,
+		qp, send_cq, send_cntr_ptr, opcode,
 		send_addr, send_length, send_lkey,
 		ah, remote_qpn, remote_qkey,
 		remote_addr, remote_rkey,
-		iters, tx_depth);
+		iters, tx_depth, timeout_cycles);
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -329,16 +426,25 @@ int efagda_run_bw(struct efa_cuda_qp *qp,
 
 int efagda_run_bw_recv(struct efa_cuda_qp *qp,
 		       struct efa_cuda_cq *recv_cq,
+		       volatile uint64_t *recv_cntr_ptr,
 		       uint64_t recv_addr, uint32_t recv_length,
 		       uint32_t recv_lkey,
 		       int iters, int rx_depth,
-		       cudaStream_t stream)
+		       int timeout_sec, cudaStream_t stream)
 {
 	cudaError_t err;
+	long long timeout_cycles = -1;
+
+	if (timeout_sec >= 0) {
+		int clock_khz;
+		cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, 0);
+		timeout_cycles = (long long)timeout_sec * (long long)clock_khz * 1000LL;
+	}
 
 	efagda_bw_recv_kernel<<<1, 1, 0, stream>>>(
-		qp, recv_cq, recv_addr, recv_length, recv_lkey,
-		iters, rx_depth);
+		qp, recv_cq, recv_cntr_ptr,
+		recv_addr, recv_length, recv_lkey,
+		iters, rx_depth, timeout_cycles);
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
