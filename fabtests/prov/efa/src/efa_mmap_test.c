@@ -39,7 +39,7 @@
 
 static void *mmap_buf;
 static struct fid_mr *mmap_mr;
-static bool use_emulated_read;
+static int device_support_rdma_read = -1;
 
 struct test_case {
 	const char *name;
@@ -124,8 +124,8 @@ static int run_single_test(struct test_case *test)
 
 	ret = setup_mmap_buffer(test->mmap_prot, test->mr_access);
 
-	/* FI_REMOTE_WRITE/FI_READ do not need IBV_ACCESS_LOCAL_WRITE without RDMA read */
-	if (use_emulated_read &&
+	/* FI_REMOTE_WRITE/FI_READ do not need IBV_ACCESS_LOCAL_WRITE without device RDMA read */
+	if (!device_support_rdma_read &&
 	    (test->mr_access == FI_REMOTE_WRITE || test->mr_access == FI_READ))
 		test->should_pass = true;
 
@@ -201,14 +201,6 @@ static int run(void)
 		return ret;
 	}
 
-	ret = fi_getopt(&ep->fid, FI_OPT_ENDPOINT, FI_OPT_EFA_EMULATED_READ,
-			&use_emulated_read,
-			&(size_t) {sizeof use_emulated_read});
-	if (ret) {
-		FT_PRINTERR("fi_getopt(FI_OPT_EFA_EMULATED_READ)", ret);
-		return ret;
-	}
-
 	ret = run_test();
 
 	cleanup_ret = ft_free_res();
@@ -225,8 +217,17 @@ int main(int argc, char **argv)
 	if (!hints)
 		return EXIT_FAILURE;
 
-	while ((op = getopt(argc, argv, "h" CS_OPTS INFO_OPTS API_OPTS)) != -1) {
+	static struct option long_opts[] = {
+		{"device-rdma-read", required_argument, NULL, 256},
+		{NULL, 0, NULL, 0},
+	};
+
+	while ((op = getopt_long(argc, argv, "h" CS_OPTS INFO_OPTS API_OPTS,
+				 long_opts, NULL)) != -1) {
 		switch (op) {
+		case 256:
+			device_support_rdma_read = atoi(optarg);
+			break;
 		default:
 			ft_parseinfo(op, optarg, hints, &opts);
 			ft_parsecsopts(op, optarg, &opts);
@@ -238,6 +239,13 @@ int main(int argc, char **argv)
 				"Test mmap buffer memory registration with different protection flags.\n");
 			return EXIT_FAILURE;
 		}
+	}
+
+	if (device_support_rdma_read < 0) {
+		fprintf(stderr, "Missing --device-rdma-read option. MR "
+				"registration uses device RDMA capability to "
+				"determine IBV access flags.\n");
+		return -FI_EINVAL;
 	}
 
 	hints->ep_attr->type = FI_EP_RDM;
