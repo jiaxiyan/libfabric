@@ -401,6 +401,47 @@ void test_efa_rdm_pke_get_available_copy_methods_align128(struct efa_resource **
 	assert_false(gdrcopy_available);
 }
 
+static void test_efa_rdm_atomic_setup(struct efa_resource *resource,
+				      struct fi_msg_atomic *msg,
+				      struct fi_ioc *ioc,
+				      struct fi_rma_ioc *rma_ioc,
+				      int *buf,
+				      struct efa_rdm_ep **efa_rdm_ep,
+				      struct efa_rdm_peer **peer)
+{
+	struct efa_ep_addr raw_addr = {0};
+	size_t raw_addr_len = sizeof(struct efa_ep_addr);
+	fi_addr_t peer_addr;
+	int err, numaddr;
+
+	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
+
+	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(err, 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	numaddr = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
+	assert_int_equal(numaddr, 1);
+
+	msg->addr = peer_addr;
+
+	ioc->addr = buf;
+	ioc->count = 1;
+	msg->msg_iov = ioc;
+	msg->iov_count = 1;
+
+	msg->rma_iov = rma_ioc;
+	msg->rma_iov_count = 1;
+	msg->datatype = FI_INT32;
+	msg->op = FI_SUM;
+
+	*efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	*peer = efa_rdm_ep_get_peer(*efa_rdm_ep, peer_addr);
+	(*peer)->flags = EFA_RDM_PEER_REQ_SENT;
+	(*peer)->is_local = false;
+}
+
 /**
  * @brief when delivery complete atomic was used and handshake packet has not been received
  * verify the txe is queued
@@ -415,44 +456,10 @@ void test_efa_rdm_ep_dc_atomic_queue_before_handshake(struct efa_resource **stat
 	struct fi_rma_ioc rma_ioc = {0};
 	struct fi_msg_atomic msg = {0};
 	struct efa_resource *resource = *state;
-	struct efa_ep_addr raw_addr = {0};
-	size_t raw_addr_len = sizeof(struct efa_ep_addr);
-	fi_addr_t peer_addr;
-	int buf[1] = {0}, err, numaddr;
+	int buf[1] = {0}, err;
 	struct efa_rdm_ope *txe;
 
-	/* disable shm to force using efa device to send */
-	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
-
-	/* create a fake peer */
-	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
-	assert_int_equal(err, 0);
-	raw_addr.qpn = 1;
-	raw_addr.qkey = 0x1234;
-	numaddr = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
-	assert_int_equal(numaddr, 1);
-
-	msg.addr = peer_addr;
-
-	ioc.addr = buf;
-	ioc.count = 1;
-	msg.msg_iov = &ioc;
-	msg.iov_count = 1;
-
-	msg.rma_iov = &rma_ioc;
-	msg.rma_iov_count = 1;
-	msg.datatype = FI_INT32;
-	msg.op = FI_SUM;
-
-	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
-
-	/* set peer->flag to EFA_RDM_PEER_REQ_SENT will make efa_rdm_atomic() think
-	 * a REQ packet has been sent to the peer (so no need to send again)
-	 * handshake has not been received, so we do not know whether the peer support DC
-	 */
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
-	peer->flags = EFA_RDM_PEER_REQ_SENT;
-	peer->is_local = false;
+	test_efa_rdm_atomic_setup(resource, &msg, &ioc, &rma_ioc, buf, &efa_rdm_ep, &peer);
 
 	assert_false(efa_rdm_ep->homogeneous_peers);
 	assert_true(dlist_empty(&efa_rdm_ep->txe_list));
@@ -466,6 +473,42 @@ void test_efa_rdm_ep_dc_atomic_queue_before_handshake(struct efa_resource **stat
 	txe = container_of(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list.next, struct efa_rdm_ope, queued_entry);
 	assert_true((txe->op == ofi_op_atomic));
 	assert_true(txe->internal_flags & EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE);
+}
+
+/**
+ * @brief verify that atomic msg_id wraps around correctly when next_msg_id overflows uint32
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_rdm_atomic_msg_id_wrap_around(struct efa_resource **state)
+{
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_peer *peer;
+	struct fi_ioc ioc = {0};
+	struct fi_rma_ioc rma_ioc = {0};
+	struct fi_msg_atomic msg = {0};
+	struct efa_resource *resource = *state;
+	int buf[1] = {0}, err;
+	struct efa_rdm_ope *txe;
+
+	test_efa_rdm_atomic_setup(resource, &msg, &ioc, &rma_ioc, buf, &efa_rdm_ep, &peer);
+
+	/* Set next_msg_id to UINT32_MAX to test wrap-around */
+	peer->next_msg_id = UINT32_MAX;
+
+	err = fi_atomicmsg(resource->ep, &msg, FI_DELIVERY_COMPLETE);
+	assert_int_equal(err, 0);
+	assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list), 1);
+	txe = container_of(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list.next, struct efa_rdm_ope, queued_entry);
+	assert_int_equal(txe->msg_id, UINT32_MAX);
+	assert_int_equal(peer->next_msg_id, 0);
+
+	err = fi_atomicmsg(resource->ep, &msg, FI_DELIVERY_COMPLETE);
+	assert_int_equal(err, 0);
+	assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list), 2);
+	txe = container_of(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list.next->next, struct efa_rdm_ope, queued_entry);
+	assert_int_equal(txe->msg_id, 0);
+	assert_int_equal(peer->next_msg_id, 1);
 }
 
 /**

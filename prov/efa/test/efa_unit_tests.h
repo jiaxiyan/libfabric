@@ -298,6 +298,9 @@ void test_efa_rdm_txe_dc_receipt_first();
 
 
 /* end of efa_unit_test_ope.c */
+
+void test_efa_rdm_atomic_msg_id_wrap_around();
+
 void test_efa_rdm_msg_send_to_local_peer_with_null_desc();
 void test_efa_fork_support_request_initialize_when_ibv_fork_support_is_needed();
 void test_efa_fork_support_request_initialize_when_ibv_fork_support_is_unneeded();
