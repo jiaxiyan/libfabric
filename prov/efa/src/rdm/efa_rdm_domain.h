@@ -7,10 +7,13 @@
 #include "efa_domain.h"
 #include <stddef.h>
 
+struct efa_rdm_ep;
+
 struct efa_rdm_domain {
 	struct efa_domain	efa_domain;
 
 	struct ofi_genlock	srx_lock; /* shared among peer providers */
+	pthread_mutex_t		progress_lock; /* serializes domain progress across threads */
 	struct fid_domain	*shm_domain;
 	struct ofi_mr_cache	*cache;
 	size_t			mtu_size;
@@ -19,16 +22,16 @@ struct efa_rdm_domain {
 	/* number of rdma-read messages in flight */
 	uint64_t		num_read_msg_in_flight;
 	/* queued op entries */
-	struct dlist_entry ope_queued_list;
+	struct dlist_ts ope_queued_list;
 	/* tx/rx_entries used by long CTS msg/write/read protocol
          * which have data to be sent */
-	struct dlist_entry ope_longcts_send_list;
+	struct dlist_ts ope_longcts_send_list;
 	/* list of #efa_rdm_peer that are in backoff due to RNR */
-	struct dlist_entry peer_backoff_list;
+	struct dlist_ts peer_backoff_list;
 	/* list of #efa_rdm_peer that will retry posting handshake pkt */
-	struct dlist_entry handshake_queued_peer_list;
+	struct dlist_ts handshake_queued_peer_list;
 	/* LRU list of AH entries in this domain */
-	struct dlist_entry ah_lru_list;
+	struct dlist_ts ah_lru_list;
 };
 
 _Static_assert(offsetof(struct efa_rdm_domain, efa_domain) == 0,

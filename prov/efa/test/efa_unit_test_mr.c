@@ -1821,10 +1821,10 @@ void test_efa_rdm_mr_gen_check_ope_skips_rxe_queued_ctrl_cts(void **state)
 	/* Simulate EAGAIN on CTS post: set QUEUED_CTRL and add to queue */
 	rxe->internal_flags |= EFA_RDM_OPE_QUEUED_CTRL;
 	rxe->queued_ctrl_type = EFA_RDM_CTS_PKT;
-	dlist_insert_tail(&rxe->queued_entry, &rdm_domain->ope_queued_list);
+	dlist_ts_insert_tail(&rdm_domain->ope_queued_list, &rxe->queued_entry);
 
 	assert_int_equal(
-		efa_unit_test_get_dlist_length(&rdm_domain->ope_queued_list), 1);
+		efa_unit_test_get_dlist_length(&rdm_domain->ope_queued_list.head), 1);
 
 	/*
 	 * Directly invoke efa_rdm_mr_gen_check_ope on the RXE.
@@ -2164,7 +2164,7 @@ void test_efa_rdm_mr_gen_check_cancels_longcts_ope(void **state)
 	/* Verify ope is on the longcts list */
 	assert_int_equal(txe->state, EFA_RDM_OPE_SEND);
 	assert_true(txe->window > 0);
-	assert_false(dlist_empty(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->ope_longcts_send_list));
+	assert_false(dlist_ts_empty(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->ope_longcts_send_list));
 
 	/* Close the MR while the ope is waiting to drip CTSDATA */
 	assert_int_equal(fi_close(&mr->fid), 0);

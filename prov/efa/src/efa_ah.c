@@ -32,12 +32,14 @@ void efa_ah_implicit_av_lru_ah_move(struct efa_domain *domain,
 
 	rdm_domain = (struct efa_rdm_domain *) domain;
 	assert(ah->implicit_refcnt > 0 || ah->explicit_refcnt > 0);
-	assert(dlist_entry_in_list(&rdm_domain->ah_lru_list,
-				   &ah->domain_lru_ah_list_entry));
 
+	ofi_spin_lock(&rdm_domain->ah_lru_list.lock);
+	assert(dlist_entry_in_list(&rdm_domain->ah_lru_list.head,
+				   &ah->domain_lru_ah_list_entry));
 	dlist_remove(&ah->domain_lru_ah_list_entry);
 	dlist_insert_tail(&ah->domain_lru_ah_list_entry,
-			  &rdm_domain->ah_lru_list);
+			  &rdm_domain->ah_lru_list.head);
+	ofi_spin_unlock(&rdm_domain->ah_lru_list.lock);
 }
 
 static inline int efa_ah_implicit_av_evict_ah(struct efa_domain *domain) {
@@ -49,13 +51,15 @@ static inline int efa_ah_implicit_av_evict_ah(struct efa_domain *domain) {
 	assert(domain->info_type == EFA_INFO_RDM);
 	rdm_domain = (struct efa_rdm_domain *) domain;
 
-	dlist_foreach_container (&rdm_domain->ah_lru_list, struct efa_ah, ah_tmp,
+	ofi_spin_lock(&rdm_domain->ah_lru_list.lock);
+	dlist_foreach_container (&rdm_domain->ah_lru_list.head, struct efa_ah, ah_tmp,
 				 domain_lru_ah_list_entry) {
 		if (ah_tmp->explicit_refcnt == 0) {
 			ah_to_release = ah_tmp;
 			break;
 		}
 	}
+	ofi_spin_unlock(&rdm_domain->ah_lru_list.lock);
 
 	if (!ah_to_release) {
 		EFA_WARN(FI_LOG_AV,
@@ -193,7 +197,7 @@ struct efa_ah *efa_ah_alloc(struct efa_domain *domain, const uint8_t *gid,
 	if (domain->info_type == EFA_INFO_RDM) {
 		struct efa_rdm_domain *rdm_domain =
 			(struct efa_rdm_domain *) domain;
-		dlist_insert_tail(&efa_ah->domain_lru_ah_list_entry, &rdm_domain->ah_lru_list);
+		dlist_ts_insert_tail(&rdm_domain->ah_lru_list, &efa_ah->domain_lru_ah_list_entry);
 	} else {
 		dlist_init(&efa_ah->domain_lru_ah_list_entry);
 	}
@@ -222,7 +226,13 @@ void efa_ah_destroy_ah(struct efa_domain *domain, struct efa_ah *ah)
 	assert(dlist_empty(&ah->implicit_conn_list));
 
 	EFA_INFO(FI_LOG_AV, "Destroying AH for ahn %d\n", ah->ahn);
-	dlist_remove(&ah->domain_lru_ah_list_entry);
+	if (domain->info_type == EFA_INFO_RDM) {
+		struct efa_rdm_domain *rdm_domain =
+			(struct efa_rdm_domain *) domain;
+		dlist_ts_remove(&rdm_domain->ah_lru_list, &ah->domain_lru_ah_list_entry);
+	} else {
+		dlist_remove(&ah->domain_lru_ah_list_entry);
+	}
 	HASH_DEL(domain->ah_map, ah);
 
 	err = ibv_destroy_ah(ah->ibv_ah);

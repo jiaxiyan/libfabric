@@ -508,7 +508,7 @@ void efa_rdm_ep_queue_rnr_pkt(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_ent
 	assert(peer);
 	if (!(ope->internal_flags & EFA_RDM_OPE_QUEUED_RNR)) {
 		ope->internal_flags |= EFA_RDM_OPE_QUEUED_RNR;
-		dlist_insert_tail(&ope->queued_entry, &efa_rdm_ep_rdm_domain(ep)->ope_queued_list);
+		dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(ep)->ope_queued_list, &ope->queued_entry);
 	}
 	if (!(pkt_entry->flags & EFA_RDM_PKE_RNR_RETRANSMIT)) {
 		/* This is the first time this packet encountered RNR,
@@ -533,9 +533,10 @@ void efa_rdm_ep_queue_rnr_pkt(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_ent
 		return;
 	}
 
+	ofi_spin_lock(&ep->peer_lock);
 	peer->flags |= EFA_RDM_PEER_IN_BACKOFF;
-	dlist_insert_tail(&peer->rnr_backoff_entry,
-			  &efa_rdm_ep_rdm_domain(ep)->peer_backoff_list);
+	ofi_spin_unlock(&ep->peer_lock);
+	dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(ep)->peer_backoff_list, &peer->rnr_backoff_entry);
 
 	peer->rnr_backoff_begin_ts = ofi_gettime_us();
 	if (peer->rnr_backoff_wait_time == 0) {
@@ -715,15 +716,20 @@ void efa_rdm_ep_post_handshake_or_queue(struct efa_rdm_ep *ep, struct efa_rdm_pe
 {
 	ssize_t err;
 
-	if (peer->flags & (EFA_RDM_PEER_HANDSHAKE_SENT | EFA_RDM_PEER_HANDSHAKE_QUEUED))
+	ofi_spin_lock(&ep->peer_lock);
+	if (peer->flags & (EFA_RDM_PEER_HANDSHAKE_SENT | EFA_RDM_PEER_HANDSHAKE_QUEUED)) {
+		ofi_spin_unlock(&ep->peer_lock);
 		return;
+	}
+	ofi_spin_unlock(&ep->peer_lock);
 
 	err = efa_rdm_ep_post_handshake(ep, peer);
 	if (OFI_UNLIKELY(err == -FI_EAGAIN)) {
 		/* add peer to handshake_queued_peer_list for retry later */
+		ofi_spin_lock(&ep->peer_lock);
 		peer->flags |= EFA_RDM_PEER_HANDSHAKE_QUEUED;
-		dlist_insert_tail(&peer->handshake_queued_entry,
-				  &efa_rdm_ep_rdm_domain(ep)->handshake_queued_peer_list);
+		ofi_spin_unlock(&ep->peer_lock);
+		dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(ep)->handshake_queued_peer_list, &peer->handshake_queued_entry);
 		return;
 	}
 
@@ -735,7 +741,9 @@ void efa_rdm_ep_post_handshake_or_queue(struct efa_rdm_ep *ep, struct efa_rdm_pe
 		return;
 	}
 
+	ofi_spin_lock(&ep->peer_lock);
 	peer->flags |= EFA_RDM_PEER_HANDSHAKE_SENT;
+	ofi_spin_unlock(&ep->peer_lock);
 }
 
 /**
@@ -1023,7 +1031,7 @@ int efa_rdm_ep_enforce_handshake_for_txe(struct efa_rdm_ep *ep, struct efa_rdm_o
 
 	if (!(txe->internal_flags & EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE)) {
 		txe->internal_flags |= EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE;
-		dlist_insert_tail(&txe->queued_entry, &efa_rdm_ep_rdm_domain(ep)->ope_queued_list);
+		dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(ep)->ope_queued_list, &txe->queued_entry);
 		ep->ope_queued_before_handshake_cnt++;
 	}
 	return FI_SUCCESS;

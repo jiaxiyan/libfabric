@@ -452,7 +452,7 @@ void test_efa_rdm_peer_destruct_clears_rnr_flag(void **state)
 
 	/* Remove the txe from the ope_queued_list so ep close doesn't trip over it */
 	pkt_entry->ope->internal_flags &= ~EFA_RDM_OPE_QUEUED_RNR;
-	dlist_remove(&pkt_entry->ope->queued_entry);
+	dlist_ts_remove(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->ope_queued_list, &pkt_entry->ope->queued_entry);
 
 	/* Remove the peer via fi_av_remove, which calls peer_destruct.
 	 * This should clear the RNR flag and decrement counters. */

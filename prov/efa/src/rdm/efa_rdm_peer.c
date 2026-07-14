@@ -117,10 +117,10 @@ void efa_rdm_peer_destruct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep)
 	}
 
 	if (peer->flags & EFA_RDM_PEER_HANDSHAKE_QUEUED)
-		dlist_remove(&peer->handshake_queued_entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(ep)->handshake_queued_peer_list, &peer->handshake_queued_entry);
 
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF)
-		dlist_remove(&peer->rnr_backoff_entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(ep)->peer_backoff_list, &peer->rnr_backoff_entry);
 
 #ifdef ENABLE_EFA_POISONING
 	efa_rdm_poison_mem_region(peer, sizeof(struct efa_rdm_peer));

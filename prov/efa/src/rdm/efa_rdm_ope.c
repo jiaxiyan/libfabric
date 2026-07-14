@@ -142,7 +142,7 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 	 */
 	if (txe->state == EFA_RDM_OPE_SEND &&
 	    !(txe->internal_flags & EFA_RDM_TXE_REMOTE_ACK_RECEIVED))
-		dlist_remove(&txe->entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(txe->ep)->ope_longcts_send_list, &txe->entry);
 
 	dlist_foreach_container_safe(&txe->queued_pkts,
 				     struct efa_rdm_pke,
@@ -151,7 +151,7 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 	}
 
 	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
-		dlist_remove(&txe->queued_entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(txe->ep)->ope_queued_list, &txe->queued_entry);
 		txe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
 	}
 
@@ -188,7 +188,7 @@ void efa_rdm_rxe_release_internal(struct efa_rdm_ope *rxe)
 	 * is released for whatever reasons.
 	 */
 	if (rxe->state == EFA_RDM_OPE_SEND)
-		dlist_remove(&rxe->entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(rxe->ep)->ope_longcts_send_list, &rxe->entry);
 
 	if (rxe->rxe_map)
 		efa_rdm_rxe_map_remove(rxe->rxe_map, rxe->msg_id, rxe);
@@ -211,7 +211,7 @@ void efa_rdm_rxe_release_internal(struct efa_rdm_ope *rxe)
 		efa_rdm_pke_release_tx(pkt_entry);
 
 	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
-		dlist_remove(&rxe->queued_entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(rxe->ep)->ope_queued_list, &rxe->queued_entry);
 		rxe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
 	}
 
@@ -608,7 +608,7 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	case EFA_RDM_RXE_MATCHED:
 		break;
 	case EFA_RDM_OPE_SEND:
-		dlist_remove(&rxe->entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(rxe->ep)->ope_longcts_send_list, &rxe->entry);
 		break;
 	case EFA_RDM_RXE_RECV:
 #if ENABLE_DEBUG
@@ -632,7 +632,7 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 		efa_rdm_pke_release_tx(pkt_entry);
 
 	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
-		dlist_remove(&rxe->queued_entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(rxe->ep)->ope_queued_list, &rxe->queued_entry);
 		rxe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
 	}
 
@@ -2033,8 +2033,7 @@ int efa_rdm_ope_post_remote_read_or_queue(struct efa_rdm_ope *ope)
 	err = efa_rdm_ope_post_read(ope);
 	switch (err) {
 	case -FI_EAGAIN:
-		dlist_insert_tail(&ope->queued_entry,
-				  &efa_rdm_ep_rdm_domain(ope->ep)->ope_queued_list);
+		dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(ope->ep)->ope_queued_list, &ope->queued_entry);
 		ope->internal_flags |= EFA_RDM_OPE_QUEUED_READ;
 		err = 0;
 		break;
@@ -2299,8 +2298,7 @@ ssize_t efa_rdm_ope_post_send_or_queue(struct efa_rdm_ope *ope, int pkt_type)
 		assert(!(ope->internal_flags & EFA_RDM_OPE_QUEUED_RNR));
 		ope->internal_flags |= EFA_RDM_OPE_QUEUED_CTRL;
 		ope->queued_ctrl_type = pkt_type;
-		dlist_insert_tail(&ope->queued_entry,
-				  &efa_rdm_ep_rdm_domain(ope->ep)->ope_queued_list);
+		dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(ope->ep)->ope_queued_list, &ope->queued_entry);
 		err = 0;
 	}
 
@@ -2393,7 +2391,7 @@ int efa_rdm_ope_process_queued_ope(struct efa_rdm_ope *ope, uint32_t flag)
 
 	} else {
 		ope->internal_flags &= ~flag;
-		dlist_remove(&ope->queued_entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(ope->ep)->ope_queued_list, &ope->queued_entry);
 	}
 
 	if (flag == EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE)

@@ -609,7 +609,7 @@ int efa_rdm_ep_open(struct fid_domain *domain, struct fi_info *info,
 
 	dlist_init(&efa_rdm_ep->ep_peer_list);
 
-	dlist_init(&efa_rdm_ep->ep_peer_list);
+	ofi_spin_init(&efa_rdm_ep->peer_lock);
 
 	*ep = &efa_rdm_ep->base_ep.util_ep.ep_fid;
 	(*ep)->msg = &efa_rdm_msg_ops;
@@ -905,16 +905,16 @@ static inline void progress_queues_closing_ep(struct efa_rdm_ep *ep)
 	assert(rdm_domain->efa_domain.info->ep_attr->type == FI_EP_RDM);
 
 	/* Update timers for peers that are in backoff list*/
-	dlist_foreach_container_safe(&rdm_domain->peer_backoff_list,
+	dlist_foreach_container_safe(&rdm_domain->peer_backoff_list.head,
 			struct efa_rdm_peer, peer, rnr_backoff_entry, tmp) {
 		if (ofi_gettime_us() >= peer->rnr_backoff_begin_ts +
 					peer->rnr_backoff_wait_time) {
 			peer->flags &= ~EFA_RDM_PEER_IN_BACKOFF;
-			dlist_remove(&peer->rnr_backoff_entry);
+			dlist_ts_remove(&rdm_domain->peer_backoff_list, &peer->rnr_backoff_entry);
 		}
 	}
 
-	dlist_foreach_container_safe(&rdm_domain->ope_queued_list,
+	dlist_foreach_container_safe(&rdm_domain->ope_queued_list.head,
 			struct efa_rdm_ope, ope, queued_entry, tmp) {
 		if (ope->ep == ep) {
 			switch (efa_rdm_pke_get_ctrl_pkt_type_from_queued_ope(ope)) {
@@ -1129,6 +1129,7 @@ static int efa_rdm_ep_close(struct fid *fid)
 
 	ofi_genlock_unlock(&((struct efa_rdm_domain *) domain)->srx_lock);
 
+	ofi_spin_destroy(&efa_rdm_ep->peer_lock);
 	free(efa_rdm_ep);
 	return retv;
 }

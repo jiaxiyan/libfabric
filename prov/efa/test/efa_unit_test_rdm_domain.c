@@ -126,13 +126,13 @@ void test_efa_domain_peer_list_cleared(void **state)
 	assert_non_null(peer4);
 
 	// Manually add peers to domain lists to simulate the conditions
-	dlist_insert_tail(&peer1->handshake_queued_entry, &rdm_domain->handshake_queued_peer_list);
+	dlist_ts_insert_tail(&rdm_domain->handshake_queued_peer_list, &peer1->handshake_queued_entry);
 	peer1->flags |= EFA_RDM_PEER_HANDSHAKE_QUEUED;
-	dlist_insert_tail(&peer2->rnr_backoff_entry, &rdm_domain->peer_backoff_list);
+	dlist_ts_insert_tail(&rdm_domain->peer_backoff_list, &peer2->rnr_backoff_entry);
 	peer2->flags |= EFA_RDM_PEER_IN_BACKOFF;
-	dlist_insert_tail(&peer3->handshake_queued_entry, &rdm_domain->handshake_queued_peer_list);
+	dlist_ts_insert_tail(&rdm_domain->handshake_queued_peer_list, &peer3->handshake_queued_entry);
 	peer3->flags |= EFA_RDM_PEER_HANDSHAKE_QUEUED;
-	dlist_insert_tail(&peer4->rnr_backoff_entry, &rdm_domain->peer_backoff_list);
+	dlist_ts_insert_tail(&rdm_domain->peer_backoff_list, &peer4->rnr_backoff_entry);
 	peer4->flags |= EFA_RDM_PEER_IN_BACKOFF;
 
 	// Close endpoints - this should clear the domain lists
@@ -140,8 +140,8 @@ void test_efa_domain_peer_list_cleared(void **state)
 	fi_close(&ep2->fid);
 
 	// Verify domain lists are cleared
-	assert_true(dlist_empty(&rdm_domain->peer_backoff_list));
-	assert_true(dlist_empty(&rdm_domain->handshake_queued_peer_list));
+	assert_true(dlist_ts_empty(&rdm_domain->peer_backoff_list));
+	assert_true(dlist_ts_empty(&rdm_domain->handshake_queued_peer_list));
 }
 /**
  * @brief Verify that EFA RDM domains use the correct MR operations

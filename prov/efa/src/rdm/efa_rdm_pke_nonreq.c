@@ -105,7 +105,9 @@ void efa_rdm_pke_handle_handshake_recv(struct efa_rdm_pke *pkt_entry)
 	peer->nextra_p3 = handshake_pkt->nextra_p3;
 	memcpy(peer->extra_info, handshake_pkt->extra_info,
 		   (handshake_pkt->nextra_p3 - 3) * sizeof(uint64_t));
+	ofi_spin_lock(&peer->ep->peer_lock);
 	peer->flags |= EFA_RDM_PEER_HANDSHAKE_RECEIVED;
+	ofi_spin_unlock(&peer->ep->peer_lock);
 
 	if (peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP) {
 		EFA_WARN(FI_LOG_CQ,
@@ -246,7 +248,7 @@ void efa_rdm_pke_handle_cts_recv(struct efa_rdm_pke *pkt_entry)
 
 	if (ope->state != EFA_RDM_OPE_SEND) {
 		ope->state = EFA_RDM_OPE_SEND;
-		dlist_insert_tail(&ope->entry, &efa_rdm_ep_rdm_domain(ep)->ope_longcts_send_list);
+		dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(ep)->ope_longcts_send_list, &ope->entry);
 	}
 }
 
@@ -461,7 +463,7 @@ void efa_rdm_pke_handle_readrsp_sent(struct efa_rdm_pke *pkt_entry)
 			efa_rdm_ope_try_fill_desc(rxe, 0, FI_SEND);
 
 		rxe->state = EFA_RDM_OPE_SEND;
-		dlist_insert_tail(&rxe->entry, &efa_rdm_ep_rdm_domain(pkt_entry->ep)->ope_longcts_send_list);
+		dlist_ts_insert_tail(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->ope_longcts_send_list, &rxe->entry);
 	}
 }
 
@@ -1147,7 +1149,7 @@ void efa_rdm_pke_handle_receipt_recv(struct efa_rdm_pke *pkt_entry)
 
 	/* Remove from ope_longcts_send_list since operation is complete */
 	if (txe->state == EFA_RDM_OPE_SEND) {
-		dlist_remove(&txe->entry);
+		dlist_ts_remove(&efa_rdm_ep_rdm_domain(txe->ep)->ope_longcts_send_list, &txe->entry);
 	}
 
 	/*

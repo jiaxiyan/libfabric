@@ -135,6 +135,9 @@ struct efa_rdm_ep {
 	/* bufpool to hold the fi_addr->peer hashmap entries */
 	struct ofi_bufpool *peer_map_entry_pool;
 
+	/**< Lock protecting peer->next_msg_id and peer->flags for this ep's peers */
+	ofi_spin_t peer_lock;
+
 	/**< List of peers associated with this endpoint */
 	struct dlist_entry ep_peer_list;
 

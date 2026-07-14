@@ -180,7 +180,9 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, const struct fi_msg *msg
 	assert(ofi_genlock_held(&efa_rdm_ep_rdm_domain(ep)->srx_lock));
 
 	peer = efa_rdm_ep_get_peer_explicit(ep, msg->addr);
+	ofi_spin_lock(&ep->peer_lock);
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
+		ofi_spin_unlock(&ep->peer_lock);
 		err = -FI_EAGAIN;
 		goto out;
 	}
@@ -188,12 +190,14 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, const struct fi_msg *msg
 	// Handle case when there are no TX packets available
 	available_tx_pkts = efa_rdm_ep_get_available_tx_pkts(ep);
 	if (OFI_UNLIKELY(available_tx_pkts == 0)) {
+		ofi_spin_unlock(&ep->peer_lock);
 		err = -FI_EAGAIN;
 		goto out;
 	}
 
 	txe = ofi_buf_alloc(ep->base_ep.ope_pool);
 	if (OFI_UNLIKELY(!txe)) {
+		ofi_spin_unlock(&ep->peer_lock);
 		err = -FI_EAGAIN;
 		goto out;
 	}
@@ -207,6 +211,7 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, const struct fi_msg *msg
 	assert(txe->op == ofi_op_msg || txe->op == ofi_op_tagged);
 
 	txe->msg_id = peer->next_msg_id++;
+	ofi_spin_unlock(&ep->peer_lock);
 
 	EFA_DBG(FI_LOG_EP_DATA,
 		"peer: %" PRIu64
@@ -219,7 +224,9 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, const struct fi_msg *msg
 	err = efa_rdm_msg_post_rtm(ep, txe);
 	if (OFI_UNLIKELY(err)) {
 		efa_rdm_txe_release(txe);
+		ofi_spin_lock(&ep->peer_lock);
 		peer->next_msg_id--;
+		ofi_spin_unlock(&ep->peer_lock);
 	}
 
 out:

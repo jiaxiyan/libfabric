@@ -141,25 +141,31 @@ ssize_t efa_rdm_atomic_generic_efa(struct efa_rdm_ep *efa_rdm_ep,
 	peer = efa_rdm_ep_get_peer_explicit(efa_rdm_ep, msg->addr);
 	assert(peer);
 
+	ofi_spin_lock(&efa_rdm_ep->peer_lock);
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
+		ofi_spin_unlock(&efa_rdm_ep->peer_lock);
 		err = -FI_EAGAIN;
 		goto out;
 	}
 
 	txe = efa_rdm_atomic_alloc_txe(efa_rdm_ep, peer, msg, atomic_ex, op, fi_flags, internal_flags);
 	if (OFI_UNLIKELY(!txe)) {
+		ofi_spin_unlock(&efa_rdm_ep->peer_lock);
 		err = -FI_EAGAIN;
 		goto out;
 	}
 
 	txe->msg_id = (peer->next_msg_id != ~0) ?
 			    peer->next_msg_id++ : ++peer->next_msg_id;
+	ofi_spin_unlock(&efa_rdm_ep->peer_lock);
 
 	err = efa_rdm_atomic_post_atomic(efa_rdm_ep, txe);
 
 	if (OFI_UNLIKELY(err)) {
 		efa_rdm_txe_release(txe);
+		ofi_spin_lock(&efa_rdm_ep->peer_lock);
 		peer->next_msg_id--;
+		ofi_spin_unlock(&efa_rdm_ep->peer_lock);
 	}
 
 out:
