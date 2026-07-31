@@ -211,6 +211,7 @@ static inline int efa_av_is_valid_address(struct efa_ep_addr *addr)
 void efa_av_implicit_av_lru_conn_move(struct efa_av *av,
 					struct efa_conn *conn)
 	OFI_TSA_REQUIRES(efa_implicit_av_lock_sym)
+	OFI_TSA_REQUIRES(efa_util_domain_lock_sym)
 {
 	assert(EFA_GENLOCK_HELD(&av->util_av_implicit.lock, efa_implicit_av_lock_sym));
 	assert(av->implicit_av_size == 0 ||
@@ -348,6 +349,7 @@ static int efa_conn_implicit_to_explicit(struct efa_av *av,
 					 fi_addr_t implicit_fi_addr,
 					 fi_addr_t *fi_addr)
 	OFI_TSA_REQUIRES(efa_implicit_av_lock_sym)
+	OFI_TSA_REQUIRES(efa_util_domain_lock_sym)
 {
 	int err;
 	struct efa_ah *ah;
@@ -436,6 +438,7 @@ static int efa_conn_implicit_to_explicit(struct efa_av *av,
 		return err;
 
 	/* Handle AH LRU list and refcnt */
+	assert(ofi_genlock_held(&av->domain->util_domain.lock));
 	assert(!dlist_empty(&ah->implicit_conn_list));
 	dlist_remove(&implicit_conn->ah_implicit_conn_list_entry);
 	efa_ah_implicit_av_lru_ah_move(av->domain, ah);
@@ -506,6 +509,7 @@ int efa_av_insert_one_explicit(struct efa_av *av,
 			       struct efa_ep_addr *addr,
 			       fi_addr_t *fi_addr, uint64_t flags,
 			       void *context, bool insert_shm_av)
+	OFI_TSA_REQUIRES(efa_util_domain_lock_sym)
 {
 	char raw_gid_str[INET6_ADDRSTRLEN];
 	struct efa_conn *conn;
@@ -593,6 +597,7 @@ int efa_av_insert_one_implicit(struct efa_av *av,
 			       struct efa_ep_addr *addr,
 			       fi_addr_t *fi_addr, uint64_t flags,
 			       void *context)
+	OFI_TSA_REQUIRES(efa_util_domain_lock_sym)
 {
 	char raw_gid_str[INET6_ADDRSTRLEN];
 	struct efa_conn *conn;
@@ -663,6 +668,7 @@ int efa_av_insert_one_implicit(struct efa_av *av,
 int efa_av_insert(struct fid_av *av_fid, const void *addr,
 			 size_t count, fi_addr_t *fi_addr,
 			 uint64_t flags, void *context)
+	OFI_TSA_NO_ANALYSIS // clang cannot reason about conditional locking statically
 {
 	struct efa_av *av = container_of(av_fid, struct efa_av, util_av.av_fid);
 	int ret = 0, success_cnt = 0;
@@ -685,7 +691,7 @@ int efa_av_insert(struct fid_av *av_fid, const void *addr,
 
 	/* Lock ordering: util_domain.lock -> util_av.lock -> util_av_implicit.lock */
 	if (av->domain->info_type == EFA_INFO_RDM)
-		ofi_genlock_lock(&av->domain->util_domain.lock);
+		EFA_GENLOCK_LOCK(&av->domain->util_domain.lock, efa_util_domain_lock_sym);
 
 	for (i = 0; i < count; i++) {
 		addr_i = (struct efa_ep_addr *) ((uint8_t *)addr + i * EFA_EP_ADDR_LEN);
@@ -703,7 +709,7 @@ int efa_av_insert(struct fid_av *av_fid, const void *addr,
 	}
 
 	if (av->domain->info_type == EFA_INFO_RDM)
-		ofi_genlock_unlock(&av->domain->util_domain.lock);
+		EFA_GENLOCK_UNLOCK(&av->domain->util_domain.lock, efa_util_domain_lock_sym);
 
 	/* cancel remaining request and log to event queue */
 	for (; i < count ; i++) {

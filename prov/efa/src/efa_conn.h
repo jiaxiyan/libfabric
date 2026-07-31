@@ -16,7 +16,7 @@ struct efa_conn {
 	fi_addr_t		fi_addr;
 	fi_addr_t		shm_fi_addr;
 	struct dlist_entry	implicit_av_lru_entry;
-	struct dlist_entry ah_implicit_conn_list_entry;
+	struct dlist_entry ah_implicit_conn_list_entry OFI_TSA_GUARDED_BY(efa_util_domain_lock_sym);
 	struct efa_conn_ep_peer_map_entry *ep_peer_map;
 };
 
@@ -51,6 +51,7 @@ void efa_conn_release(struct efa_av *av, struct efa_conn *conn,
 		      bool release_from_implicit_av);
 
 void efa_conn_release_implicit_ah_unsafe(struct efa_av *av, struct efa_conn *conn)
-	OFI_TSA_REQUIRES(efa_implicit_av_lock_sym);
+	OFI_TSA_REQUIRES(efa_implicit_av_lock_sym)
+	OFI_TSA_REQUIRES(efa_util_domain_lock_sym);
 
 #endif
