@@ -111,6 +111,7 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 	int i, err = 0;
 	struct dlist_entry *tmp;
 	struct efa_rdm_pke *pkt_entry;
+	struct efa_rdm_domain *rdm_domain = efa_rdm_ep_rdm_domain(txe->ep);
 
 	/* txe->peer would be NULL for local read operation */
 	if (txe->peer) {
@@ -129,9 +130,9 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 		}
 	}
 
-	efa_rdm_domain_ope_list_lock(efa_rdm_ep_rdm_domain(txe->ep));
+	efa_rdm_domain_ope_list_lock(rdm_domain);
 	dlist_remove(&txe->ep_entry);
-	efa_rdm_domain_ope_list_unlock(efa_rdm_ep_rdm_domain(txe->ep));
+	efa_rdm_domain_ope_list_unlock(rdm_domain);
 
 	/**
 	 * Make sure the entry is removed
@@ -139,20 +140,28 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 	 * is released for whatever reasons.
 	 * Skip removal if receipt was already processed
 	 * (which would have already removed it from the list).
+	 *
+	 * progress_lock may already be held when called from progress_queues_closing_ep
+	 * Check ofi_genlock_held() to avoid deadlock with the non-recursive mutex.
 	 */
+	bool held = ofi_genlock_held(&rdm_domain->progress_lock);
+	if (!held)
+		ofi_genlock_lock(&rdm_domain->progress_lock);
 	if (txe->state == EFA_RDM_OPE_SEND &&
 	    !(txe->internal_flags & EFA_RDM_TXE_REMOTE_ACK_RECEIVED))
 		dlist_remove(&txe->entry);
+
+	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
+		dlist_remove(&txe->queued_entry);
+		txe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
+	}
+	if (!held)
+		ofi_genlock_unlock(&rdm_domain->progress_lock);
 
 	dlist_foreach_container_safe(&txe->queued_pkts,
 				     struct efa_rdm_pke,
 				     pkt_entry, entry, tmp) {
 		efa_rdm_pke_release_tx(pkt_entry);
-	}
-
-	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
-		dlist_remove(&txe->queued_entry);
-		txe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
 	}
 
 	txe->gen++;
@@ -173,22 +182,36 @@ void efa_rdm_rxe_release_internal(struct efa_rdm_ope *rxe)
 {
 	struct efa_rdm_pke *pkt_entry;
 	struct dlist_entry *tmp;
+	struct efa_rdm_domain *rdm_domain = efa_rdm_ep_rdm_domain(rxe->ep);
 	int i, err;
 
 	if (rxe->peer)
 		dlist_remove(&rxe->peer_entry);
 
-	efa_rdm_domain_ope_list_lock(efa_rdm_ep_rdm_domain(rxe->ep));
+	efa_rdm_domain_ope_list_lock(rdm_domain);
 	dlist_remove(&rxe->ep_entry);
-	efa_rdm_domain_ope_list_unlock(efa_rdm_ep_rdm_domain(rxe->ep));
+	efa_rdm_domain_ope_list_unlock(rdm_domain);
 
 	/**
 	 * Make sure the entry is removed
 	 * from ope_longcts_list when the ope
 	 * is released for whatever reasons.
+	 *
+	 * progress_lock may already be held when called from progress_queues_closing_ep
+	 * Check ofi_genlock_held() to avoid deadlock with the non-recursive mutex.
 	 */
+	bool held = ofi_genlock_held(&rdm_domain->progress_lock);
+	if (!held)
+		ofi_genlock_lock(&rdm_domain->progress_lock);
 	if (rxe->state == EFA_RDM_OPE_SEND)
 		dlist_remove(&rxe->entry);
+
+	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
+		dlist_remove(&rxe->queued_entry);
+		rxe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
+	}
+	if (!held)
+		ofi_genlock_unlock(&rdm_domain->progress_lock);
 
 	if (rxe->rxe_map)
 		efa_rdm_rxe_map_remove(rxe->rxe_map, rxe->msg_id, rxe);
@@ -209,11 +232,6 @@ void efa_rdm_rxe_release_internal(struct efa_rdm_ope *rxe)
 				     struct efa_rdm_pke,
 				     pkt_entry, entry, tmp)
 		efa_rdm_pke_release_tx(pkt_entry);
-
-	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
-		dlist_remove(&rxe->queued_entry);
-		rxe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
-	}
 
 	rxe->gen++;
 	rxe->gen &= EFA_RDM_GEN_MASK;
@@ -586,6 +604,7 @@ ssize_t efa_rdm_ope_prepare_to_post_send(struct efa_rdm_ope *ope, int pkt_type,
 void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 {
 	struct efa_rdm_ep *ep;
+	struct efa_rdm_domain *rdm_domain;
 	struct fi_cq_err_entry err_entry;
 	struct util_cq *util_cq;
 	struct dlist_entry *tmp;
@@ -598,6 +617,7 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	memset(&err_entry, 0, sizeof(err_entry));
 
 	ep = rxe->ep;
+	rdm_domain = efa_rdm_ep_rdm_domain(ep);
 	util_cq = ep->base_ep.util_ep.rx_cq;
 
 	err_entry.err = err;
@@ -609,8 +629,20 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	case EFA_RDM_RXE_MATCHED:
 		break;
 	case EFA_RDM_OPE_SEND:
+	{
+		/*
+		* progress_lock may already be held when called from
+		* efa_rdm_ope_process_queued_ope() via progress_peers_and_queues().
+		* Use ofi_genlock_held() to avoid deadlock with the non-recursive mutex.
+		*/
+		bool held = ofi_genlock_held(&rdm_domain->progress_lock);
+		if (!held)
+			ofi_genlock_lock(&rdm_domain->progress_lock);
 		dlist_remove(&rxe->entry);
+		if (!held)
+			ofi_genlock_unlock(&rdm_domain->progress_lock);
 		break;
+	}
 	case EFA_RDM_RXE_RECV:
 #if ENABLE_DEBUG
 		dlist_remove(&rxe->pending_recv_entry);
@@ -634,7 +666,12 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 		efa_rdm_pke_release_tx(pkt_entry);
 
 	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
+		bool held = ofi_genlock_held(&rdm_domain->progress_lock);
+		if (!held)
+			ofi_genlock_lock(&rdm_domain->progress_lock);
 		dlist_remove(&rxe->queued_entry);
+		if (!held)
+			ofi_genlock_unlock(&rdm_domain->progress_lock);
 		rxe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
 	}
 
@@ -1005,6 +1042,7 @@ static bool efa_rdm_txe_mark_peer_abort_if_needed(struct efa_rdm_ope *txe,
 void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 {
 	struct efa_rdm_ep *ep;
+	struct efa_rdm_domain *rdm_domain;
 	struct fi_cq_err_entry err_entry;
 	struct util_cq *util_cq;
 	struct dlist_entry *tmp;
@@ -1013,6 +1051,7 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	char err_msg[EFA_ERROR_MSG_BUFFER_LENGTH] = {0};
 
 	ep = txe->ep;
+	rdm_domain = efa_rdm_ep_rdm_domain(ep);
 	memset(&err_entry, 0, sizeof(err_entry));
 
 	util_cq = ep->base_ep.util_ep.tx_cq;
@@ -1024,8 +1063,19 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	case EFA_RDM_TXE_REQ:
 		break;
 	case EFA_RDM_OPE_SEND:
-		if (!(txe->internal_flags & EFA_RDM_TXE_REMOTE_ACK_RECEIVED))
+		/*
+		* progress_lock may already be held when called from
+		* efa_rdm_ope_process_queued_ope() via progress_peers_and_queues().
+		* Use ofi_genlock_held() to avoid deadlock with the non-recursive mutex.
+		*/
+		if (!(txe->internal_flags & EFA_RDM_TXE_REMOTE_ACK_RECEIVED)) {
+			bool held = ofi_genlock_held(&rdm_domain->progress_lock);
+			if (!held)
+				ofi_genlock_lock(&rdm_domain->progress_lock);
 			dlist_remove(&txe->entry);
+			if (!held)
+				ofi_genlock_unlock(&rdm_domain->progress_lock);
+		}
 		break;
 	case EFA_RDM_OPE_ERR:
 		/* Already errored. Drive the drain only for a peer abort, so its
@@ -1044,7 +1094,12 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	txe->state = EFA_RDM_OPE_ERR;
 
 	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
+		bool held = ofi_genlock_held(&rdm_domain->progress_lock);
+		if (!held)
+			ofi_genlock_lock(&rdm_domain->progress_lock);
 		dlist_remove(&txe->queued_entry);
+		if (!held)
+			ofi_genlock_unlock(&rdm_domain->progress_lock);
 		txe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
 	}
 
@@ -2032,8 +2087,10 @@ int efa_rdm_ope_post_remote_read_or_queue(struct efa_rdm_ope *ope)
 	err = efa_rdm_ope_post_read(ope);
 	switch (err) {
 	case -FI_EAGAIN:
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ope->ep)->progress_lock);
 		dlist_insert_tail(&ope->queued_entry,
 				  &efa_rdm_ep_rdm_domain(ope->ep)->ope_queued_list);
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ope->ep)->progress_lock);
 		ope->internal_flags |= EFA_RDM_OPE_QUEUED_READ;
 		err = 0;
 		break;
@@ -2299,8 +2356,10 @@ ssize_t efa_rdm_ope_post_send_or_queue(struct efa_rdm_ope *ope, int pkt_type)
 		assert(!(ope->internal_flags & EFA_RDM_OPE_QUEUED_RNR));
 		ope->internal_flags |= EFA_RDM_OPE_QUEUED_CTRL;
 		ope->queued_ctrl_type = pkt_type;
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ope->ep)->progress_lock);
 		dlist_insert_tail(&ope->queued_entry,
 				  &efa_rdm_ep_rdm_domain(ope->ep)->ope_queued_list);
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ope->ep)->progress_lock);
 		err = 0;
 	}
 

@@ -135,6 +135,13 @@ int efa_rdm_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 	if (EFA_INFO_TYPE_IS_DGRAM(info))
 		return efa_domain_open(fabric_fid, info, domain_fid, context);
 
+	if (!EFA_INFO_TYPE_IS_RDM(info)) {
+		EFA_WARN(FI_LOG_DOMAIN,
+			 "efa_rdm_domain_open called with non-rdm info\n");
+		*domain_fid = NULL;
+		return -FI_EINVAL;
+	}
+
 	if (!info->domain_attr) {
 		EFA_WARN(FI_LOG_DOMAIN,
 			 "efa_rdm_domain_open called without domain_attr\n");
@@ -160,14 +167,15 @@ int efa_rdm_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 		return err;
 	}
 
-	if (!EFA_INFO_TYPE_IS_RDM(info)) {
-		EFA_WARN(FI_LOG_DOMAIN,
-			 "efa_rdm_domain_open called with non-rdm info\n");
+	err = ofi_genlock_init(&rdm_domain->progress_lock, OFI_LOCK_MUTEX);
+	if (err) {
+		EFA_WARN(FI_LOG_DOMAIN, "progress lock init failed! err: %d\n", err);
 		ofi_genlock_destroy(&rdm_domain->srx_lock);
 		free(rdm_domain);
 		*domain_fid = NULL;
-		return -FI_EINVAL;
+		return err;
 	}
+
 	efa_domain->info_type = EFA_INFO_RDM;
 
 	err = efa_domain_init_base(efa_domain, fabric_fid, info, context);
@@ -248,6 +256,7 @@ static int efa_rdm_domain_close(fid_t fid)
 
 	efa_domain_destruct(efa_domain);
 
+	ofi_genlock_destroy(&rdm_domain->progress_lock);
 	ofi_genlock_destroy(&rdm_domain->srx_lock);
 	free(rdm_domain);
 	return 0;
@@ -284,6 +293,7 @@ void efa_rdm_domain_progress_peers_and_queues(struct efa_rdm_domain *rdm_domain)
 	assert(rdm_domain->efa_domain.info->ep_attr->type == FI_EP_RDM);
 
 	/* Update timers for peers that are in backoff list*/
+	ofi_genlock_lock(&rdm_domain->progress_lock);
 	dlist_foreach_container_safe(&rdm_domain->peer_backoff_list, struct efa_rdm_peer,
 				     peer, rnr_backoff_entry, tmp) {
 		if (ofi_gettime_us() >= peer->rnr_backoff_begin_ts +
@@ -390,4 +400,6 @@ void efa_rdm_domain_progress_peers_and_queues(struct efa_rdm_domain *rdm_domain)
 			}
 		}
 	}
+
+	ofi_genlock_unlock(&rdm_domain->progress_lock);
 }

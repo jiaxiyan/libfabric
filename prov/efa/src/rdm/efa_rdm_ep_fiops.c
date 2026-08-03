@@ -909,6 +909,7 @@ static inline void progress_queues_closing_ep(struct efa_rdm_ep *ep)
 	assert(rdm_domain->efa_domain.info->ep_attr->type == FI_EP_RDM);
 
 	/* Update timers for peers that are in backoff list*/
+	ofi_genlock_lock(&rdm_domain->progress_lock);
 	dlist_foreach_container_safe(&rdm_domain->peer_backoff_list,
 			struct efa_rdm_peer, peer, rnr_backoff_entry, tmp) {
 		if (ofi_gettime_us() >= peer->rnr_backoff_begin_ts +
@@ -939,6 +940,7 @@ static inline void progress_queues_closing_ep(struct efa_rdm_ep *ep)
 			}
 		}
 	}
+	ofi_genlock_unlock(&rdm_domain->progress_lock);
 }
 
 /*

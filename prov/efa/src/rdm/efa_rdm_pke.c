@@ -184,8 +184,10 @@ void efa_rdm_pke_release_tx(struct efa_rdm_pke *pkt_entry)
 		peer->rnr_queued_pkt_cnt--;
 		peer->rnr_backoff_wait_time = 0;
 		if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
+			ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 			dlist_remove(&peer->rnr_backoff_entry);
 			peer->flags &= ~EFA_RDM_PEER_IN_BACKOFF;
+			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 		}
 		EFA_DBG(FI_LOG_EP_DATA,
 			"reset backoff timer for peer fi_addr: %" PRIu64

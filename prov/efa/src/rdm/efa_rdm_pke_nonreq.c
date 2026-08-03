@@ -269,7 +269,9 @@ void efa_rdm_pke_handle_cts_recv(struct efa_rdm_pke *pkt_entry)
 
 	if (ope->state != EFA_RDM_OPE_SEND) {
 		ope->state = EFA_RDM_OPE_SEND;
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 		dlist_insert_tail(&ope->entry, &efa_rdm_ep_rdm_domain(ep)->ope_longcts_send_list);
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 	}
 }
 
@@ -484,7 +486,9 @@ void efa_rdm_pke_handle_readrsp_sent(struct efa_rdm_pke *pkt_entry)
 			efa_rdm_ope_try_fill_desc(rxe, 0, FI_SEND);
 
 		rxe->state = EFA_RDM_OPE_SEND;
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->progress_lock);
 		dlist_insert_tail(&rxe->entry, &efa_rdm_ep_rdm_domain(pkt_entry->ep)->ope_longcts_send_list);
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->progress_lock);
 	}
 }
 
@@ -1176,7 +1180,9 @@ void efa_rdm_pke_handle_receipt_recv(struct efa_rdm_pke *pkt_entry)
 
 	/* Remove from ope_longcts_send_list since operation is complete */
 	if (txe->state == EFA_RDM_OPE_SEND) {
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->progress_lock);
 		dlist_remove(&txe->entry);
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->progress_lock);
 	}
 
 	/*

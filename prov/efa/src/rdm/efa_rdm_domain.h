@@ -18,6 +18,8 @@ struct efa_rdm_domain {
 	size_t			rdm_cq_size;
 	/* number of rdma-read messages in flight */
 	uint64_t		num_read_msg_in_flight;
+	/* protects the lists below in progress_peers_and_queues */
+	struct ofi_genlock	progress_lock;
 	/* queued op entries */
 	struct dlist_entry ope_queued_list;
 	/* tx/rx_entries used by long CTS msg/write/read protocol

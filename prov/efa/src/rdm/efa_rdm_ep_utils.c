@@ -557,7 +557,9 @@ void efa_rdm_ep_queue_rnr_pkt(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_ent
 	assert(peer);
 	if (!(ope->internal_flags & EFA_RDM_OPE_QUEUED_RNR)) {
 		ope->internal_flags |= EFA_RDM_OPE_QUEUED_RNR;
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 		dlist_insert_tail(&ope->queued_entry, &efa_rdm_ep_rdm_domain(ep)->ope_queued_list);
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 	}
 	if (!(pkt_entry->flags & EFA_RDM_PKE_RNR_RETRANSMIT)) {
 		/* This is the first time this packet encountered RNR,
@@ -582,6 +584,7 @@ void efa_rdm_ep_queue_rnr_pkt(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_ent
 		return;
 	}
 
+	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 	peer->flags |= EFA_RDM_PEER_IN_BACKOFF;
 	dlist_insert_tail(&peer->rnr_backoff_entry,
 			  &efa_rdm_ep_rdm_domain(ep)->peer_backoff_list);
@@ -611,6 +614,7 @@ void efa_rdm_ep_queue_rnr_pkt(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_ent
 			peer->conn->fi_addr, peer->conn->implicit_fi_addr,
 			peer->rnr_backoff_wait_time, peer->rnr_queued_pkt_cnt);
 	}
+	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 }
 
 /**
@@ -1072,7 +1076,9 @@ int efa_rdm_ep_enforce_handshake_for_txe(struct efa_rdm_ep *ep, struct efa_rdm_o
 
 	if (!(txe->internal_flags & EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE)) {
 		txe->internal_flags |= EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE;
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 		dlist_insert_tail(&txe->queued_entry, &efa_rdm_ep_rdm_domain(ep)->ope_queued_list);
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 		ep->ope_queued_before_handshake_cnt++;
 	}
 	return FI_SUCCESS;

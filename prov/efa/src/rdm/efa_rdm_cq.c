@@ -569,7 +569,9 @@ static void efa_rdm_cq_handle_recv_completion(struct efa_ibv_cq *ibv_cq, struct 
 		pkt_entry->peer->is_local = 0;
 	}
 
+	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 	efa_rdm_ep_post_handshake_or_queue(ep, pkt_entry->peer);
+	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 
 	/* Proc receives with pkt hdrs (posted to ctrl QPs)*/
 	base_hdr = efa_rdm_pke_get_base_hdr(pkt_entry);
