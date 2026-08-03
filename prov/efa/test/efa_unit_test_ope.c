@@ -3699,8 +3699,8 @@ void test_efa_rdm_pke_handle_peer_error_recv_longread_fails_txe(void **state)
 
 	/* The sender would have incremented num_read_msg_in_flight when
 	 * it sent the LONGREAD/RUNTREAD RTM. Simulate that. */
-	efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight = 1;
-	in_flight_before = efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight;
+	ofi_atomic_set64(&efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight, 1);
+	in_flight_before = ofi_atomic_get64(&efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight);
 
 	/* Build the inbound PEER_ERROR_PKT pointing at our txe via send_id. */
 	pkt_entry = efa_rdm_pke_alloc(ep, ep->efa_rx_pkt_pool,
@@ -3721,7 +3721,7 @@ void test_efa_rdm_pke_handle_peer_error_recv_longread_fails_txe(void **state)
 	efa_rdm_pke_handle_peer_error_recv(pkt_entry);
 
 	/* num_read_msg_in_flight decremented. */
-	assert_int_equal(efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight,
+	assert_int_equal(ofi_atomic_get64(&efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight),
 			 in_flight_before - 1);
 
 	/* User must see a TX CQ error with the clean, dedicated

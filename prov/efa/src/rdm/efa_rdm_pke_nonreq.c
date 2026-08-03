@@ -766,7 +766,7 @@ void efa_rdm_pke_handle_eor_recv(struct efa_rdm_pke *pkt_entry)
 	struct efa_rdm_eor_hdr *eor_hdr;
 	struct efa_rdm_ope *txe;
 
-	efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight -= 1;
+	ofi_atomic_dec64(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight);
 
 	eor_hdr = (struct efa_rdm_eor_hdr *)pkt_entry->wiredata;
 
@@ -800,7 +800,7 @@ void efa_rdm_pke_handle_read_nack_recv(struct efa_rdm_pke *pkt_entry)
 	struct efa_rdm_ope *txe;
 	bool delivery_complete_requested;
 
-	efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight -= 1;
+	ofi_atomic_dec64(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight);
 
 	nack_hdr = (struct efa_rdm_read_nack_hdr *) pkt_entry->wiredata;
 
@@ -1067,8 +1067,8 @@ void efa_rdm_pke_handle_peer_error_recv(struct efa_rdm_pke *pkt_entry)
 		 * and the num_read_msg_in_flight would get decremented upon
 		 * receipt of the EOR packet, mirror book keeping.
 		 */
-		if (OFI_LIKELY(efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight > 0))
-			efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight -= 1;
+		if (OFI_LIKELY(ofi_atomic_get64(&efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight) > 0))
+			ofi_atomic_dec64(&efa_rdm_ep_rdm_domain(ep)->num_read_msg_in_flight);
 
 		/*
 		 * Defer the free to WR drain, exactly like the local

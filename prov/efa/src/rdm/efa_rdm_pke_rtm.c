@@ -1185,7 +1185,7 @@ ssize_t efa_rdm_pke_init_longread_tagrtm(struct efa_rdm_pke *pkt_entry,
  */
 void efa_rdm_pke_handle_longread_rtm_sent(struct efa_rdm_pke *pkt_entry)
 {
-	efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight += 1;
+	ofi_atomic_inc64(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight);
 }
 
 /**
@@ -1345,7 +1345,7 @@ void efa_rdm_pke_handle_runtread_rtm_sent(struct efa_rdm_pke *pkt_entry, struct 
 
 	if (efa_rdm_pke_get_runtread_rtm_base_hdr(pkt_entry)->seg_offset == 0 &&
 	    txe->total_len > txe->bytes_runt)
-		efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight += 1;
+		ofi_atomic_inc64(&efa_rdm_ep_rdm_domain(pkt_entry->ep)->num_read_msg_in_flight);
 }
 
 /**
