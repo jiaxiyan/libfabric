@@ -125,11 +125,12 @@ void efa_rdm_peer_destruct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep)
 		efa_rdm_rxe_release(rxe);
 	}
 
+	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 	if (peer->flags & EFA_RDM_PEER_HANDSHAKE_QUEUED)
 		dlist_remove(&peer->handshake_queued_entry);
-
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF)
 		dlist_remove(&peer->rnr_backoff_entry);
+	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->progress_lock);
 
 #ifdef ENABLE_EFA_POISONING
 	efa_rdm_poison_mem_region(peer, sizeof(struct efa_rdm_peer));

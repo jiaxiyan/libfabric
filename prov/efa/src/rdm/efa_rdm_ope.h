@@ -214,9 +214,15 @@ void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 
 void efa_rdm_txe_release(struct efa_rdm_ope *txe);
 
+void efa_rdm_txe_release_safe_progress(struct efa_rdm_ope *txe);
+
 void efa_rdm_rxe_release(struct efa_rdm_ope *rxe);
 
+void efa_rdm_rxe_release_safe_progress(struct efa_rdm_ope *rxe);
+
 void efa_rdm_rxe_release_internal(struct efa_rdm_ope *rxe);
+
+void efa_rdm_rxe_release_internal_safe_progress(struct efa_rdm_ope *rxe);
 
 /* The follow flags are applied to the internal_flags field
  * of an efa_rdm_ope*/
