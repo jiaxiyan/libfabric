@@ -157,8 +157,8 @@ int efa_rdm_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 	efa_domain = &rdm_domain->efa_domain;
 
 	/* Initialize srx_lock first so efa_rdm_domain_close can always destroy it */
-	use_lock = ofi_thread_level(info->domain_attr->threading) <=
-		   ofi_thread_level(FI_THREAD_COMPLETION);
+	use_lock = ofi_thread_level(info->domain_attr->threading) ==
+		   ofi_thread_level(FI_THREAD_SAFE);
 	err = ofi_genlock_init(&rdm_domain->srx_lock, use_lock ? OFI_LOCK_MUTEX : OFI_LOCK_NOOP);
 	if (err) {
 		EFA_WARN(FI_LOG_DOMAIN, "srx lock init failed! err: %d\n", err);
