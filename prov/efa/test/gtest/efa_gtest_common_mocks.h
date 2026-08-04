@@ -14,6 +14,7 @@
 struct efa_av;
 struct efa_cur_reverse_av;
 struct efa_prv_reverse_av;
+struct efa_reverse_av_snapshot;
 struct efa_conn;
 struct ofi_mr_map;
 struct fi_mr_attr;
@@ -42,10 +43,11 @@ struct efa_ah;
 	   uint32_t inlen),                                                    \
 	  (ibv_ah, attr, inlen))                                               \
 	X(int, efa_av_reverse_av_add,                                          \
-	  (struct efa_av * av, struct efa_cur_reverse_av * *cur_reverse_av,    \
-	   struct efa_prv_reverse_av * *prv_reverse_av,                        \
+	  (struct efa_av * av,                                                 \
+	   struct efa_reverse_av_snapshot * *published,                         \
+	   struct efa_reverse_av_snapshot * *old_slot,                          \
 	   struct efa_conn * conn),                                            \
-	  (av, cur_reverse_av, prv_reverse_av, conn))                          \
+	  (av, published, old_slot, conn))                                     \
 	X(int, efa_ibv_cq_start_poll,                                          \
 	  (struct efa_ibv_cq * ibv_cq, struct ibv_poll_cq_attr * attr),        \
 	  (ibv_cq, attr))                                                      \

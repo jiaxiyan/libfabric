@@ -254,16 +254,16 @@ static void test_av_verify_av_hash_cnt(struct efa_av *av,
 {
 	assert_int_equal(HASH_CNT(hh, av->util_av.hash),
 			 explicit_cur_av_count + explicit_prv_av_count);
-	assert_int_equal(HASH_CNT(hh, av->cur_reverse_av),
+	assert_int_equal(HASH_CNT(hh, av->reverse_av->cur),
 			 explicit_cur_av_count);
-	assert_int_equal(HASH_CNT(hh, av->prv_reverse_av),
+	assert_int_equal(HASH_CNT(hh, av->reverse_av->prv),
 			 explicit_prv_av_count);
 
 	assert_int_equal(HASH_CNT(hh, av->util_av_implicit.hash),
 			 implicit_cur_av_count + implicit_prv_av_count);
-	assert_int_equal(HASH_CNT(hh, av->cur_reverse_av_implicit),
+	assert_int_equal(HASH_CNT(hh, av->reverse_av_implicit->cur),
 			 implicit_cur_av_count);
-	assert_int_equal(HASH_CNT(hh, av->prv_reverse_av_implicit),
+	assert_int_equal(HASH_CNT(hh, av->reverse_av_implicit->prv),
 			 implicit_prv_av_count);
 }
 

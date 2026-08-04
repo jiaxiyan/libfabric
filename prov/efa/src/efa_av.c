@@ -70,21 +70,25 @@ struct efa_conn *efa_av_addr_to_conn_implicit(struct efa_av *av, fi_addr_t fi_ad
  */
 fi_addr_t efa_av_reverse_lookup(struct efa_av *av, uint16_t ahn, uint16_t qpn)
 {
+	struct efa_reverse_av_snapshot *snap;
 	struct efa_cur_reverse_av *cur_entry;
 	struct efa_cur_reverse_av_key cur_key;
+
+	snap = av->reverse_av;
+	ofi_rmb();
 
 	memset(&cur_key, 0, sizeof(cur_key));
 	cur_key.ahn = ahn;
 	cur_key.qpn = qpn;
 	/* coverity[overflow_const : FALSE] - intentional unsigned wraparound in uthash Jenkins hash */
-	HASH_FIND(hh, av->cur_reverse_av, &cur_key, sizeof(cur_key), cur_entry);
+	HASH_FIND(hh, snap->cur, &cur_key, sizeof(cur_key), cur_entry);
 
 	return (OFI_LIKELY(!!cur_entry)) ? cur_entry->conn->fi_addr : FI_ADDR_NOTAVAIL;
 }
 
 static inline struct efa_conn *
-efa_av_reverse_lookup_rdm_conn(struct efa_cur_reverse_av **cur_reverse_av,
-			       struct efa_prv_reverse_av **prv_reverse_av,
+efa_av_reverse_lookup_rdm_conn(struct efa_cur_reverse_av *cur_root,
+			       struct efa_prv_reverse_av *prv_root,
 			       uint16_t ahn, uint16_t qpn,
 			       struct efa_rdm_pke *pkt_entry)
 {
@@ -98,7 +102,7 @@ efa_av_reverse_lookup_rdm_conn(struct efa_cur_reverse_av **cur_reverse_av,
 	cur_key.qpn = qpn;
 
 	/* coverity[overflow_const : FALSE] - intentional unsigned wraparound in uthash Jenkins hash */
-	HASH_FIND(hh, *cur_reverse_av, &cur_key, sizeof(cur_key), cur_entry);
+	HASH_FIND(hh, cur_root, &cur_key, sizeof(cur_key), cur_entry);
 
 	if (OFI_UNLIKELY(!cur_entry))
 		return NULL;
@@ -134,7 +138,7 @@ efa_av_reverse_lookup_rdm_conn(struct efa_cur_reverse_av **cur_reverse_av,
 	prv_key.ahn = ahn;
 	prv_key.qpn = qpn;
 	prv_key.connid = *connid;
-	HASH_FIND(hh, *prv_reverse_av, &prv_key, sizeof(prv_key), prv_entry);
+	HASH_FIND(hh, prv_root, &prv_key, sizeof(prv_key), prv_entry);
 
 	return OFI_LIKELY(!!prv_entry) ? prv_entry->conn : NULL;
 };
@@ -152,10 +156,14 @@ efa_av_reverse_lookup_rdm_conn(struct efa_cur_reverse_av **cur_reverse_av,
 fi_addr_t efa_av_reverse_lookup_rdm(struct efa_av *av, uint16_t ahn,
 				    uint16_t qpn, struct efa_rdm_pke *pkt_entry)
 {
+	struct efa_reverse_av_snapshot *snap;
 	struct efa_conn *conn;
 
+	snap = av->reverse_av;
+	ofi_rmb();
+
 	conn = efa_av_reverse_lookup_rdm_conn(
-		&av->cur_reverse_av, &av->prv_reverse_av, ahn, qpn, pkt_entry);
+		snap->cur, snap->prv, ahn, qpn, pkt_entry);
 
 	if (OFI_LIKELY(!!conn))
 		return conn->fi_addr;
@@ -177,19 +185,22 @@ fi_addr_t efa_av_reverse_lookup_rdm_implicit(struct efa_av *av, uint16_t ahn,
 					     uint16_t qpn,
 					     struct efa_rdm_pke *pkt_entry)
 {
+	struct efa_reverse_av_snapshot *snap;
 	struct efa_conn *conn;
 	fi_addr_t implicit_fi_addr = FI_ADDR_NOTAVAIL;
 
-	EFA_GENLOCK_LOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
-	conn = efa_av_reverse_lookup_rdm_conn(&av->cur_reverse_av_implicit,
-					      &av->prv_reverse_av_implicit, ahn,
+	snap = av->reverse_av_implicit;
+	ofi_rmb();
+
+	conn = efa_av_reverse_lookup_rdm_conn(snap->cur, snap->prv, ahn,
 					      qpn, pkt_entry);
 
 	if (OFI_LIKELY(!!conn)) {
+		EFA_GENLOCK_LOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
 		efa_av_implicit_av_lru_conn_move(av, conn);
+		EFA_GENLOCK_UNLOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
 		implicit_fi_addr = conn->implicit_fi_addr;
 	}
-	EFA_GENLOCK_UNLOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
 
 	return implicit_fi_addr;
 }
@@ -227,19 +238,92 @@ void efa_av_implicit_av_lru_conn_move(struct efa_av *av,
 }
 
 /*
- * @brief Add newly insert address to the reverse AVs
+ * RCU snapshot helpers for reverse AV.
  *
- * @param[in]		av		EFA AV object
- * @param[in,out]	cur_reverse_av	Reverse AV with AHN and QPN as key
- * @param[in,out]	prv_reverse_av	Reverse AV with AHN, QPN and QKEY as key
- * @param[in]		conn		efa_conn object
- * @return		On success, return 0.
- * 			Otherwise, return a negative libfabric error code
+ * Readers load the snapshot pointer atomically and traverse the uthash
+ * tables without locks. Writers (under util_av.lock) clone the current
+ * snapshot, mutate the clone, then publish it with an atomic store-release.
+ * The previous snapshot is freed on the next write (two-generation reclaim).
  */
-int efa_av_reverse_av_add(struct efa_av *av,
-				 struct efa_cur_reverse_av **cur_reverse_av,
-				 struct efa_prv_reverse_av **prv_reverse_av,
-				 struct efa_conn *conn)
+
+struct efa_reverse_av_snapshot *efa_reverse_av_snapshot_create(void)
+{
+	return calloc(1, sizeof(struct efa_reverse_av_snapshot));
+}
+
+void efa_reverse_av_snapshot_destroy(struct efa_reverse_av_snapshot *snap)
+{
+	struct efa_cur_reverse_av *cur, *cur_tmp;
+	struct efa_prv_reverse_av *prv, *prv_tmp;
+
+	if (!snap)
+		return;
+
+	HASH_ITER(hh, snap->cur, cur, cur_tmp) {
+		HASH_DEL(snap->cur, cur);
+		free(cur);
+	}
+	HASH_ITER(hh, snap->prv, prv, prv_tmp) {
+		HASH_DEL(snap->prv, prv);
+		free(prv);
+	}
+	free(snap);
+}
+
+/**
+ * @brief Deep-clone a reverse AV snapshot.
+ *
+ * Allocates a new snapshot and copies all cur/prv entries. The clone
+ * is independent of the source and can be mutated freely.
+ */
+static struct efa_reverse_av_snapshot *
+efa_reverse_av_snapshot_clone(const struct efa_reverse_av_snapshot *src)
+{
+	struct efa_reverse_av_snapshot *dst;
+	struct efa_cur_reverse_av *cur_src, *cur_tmp, *cur_new;
+	struct efa_prv_reverse_av *prv_src, *prv_tmp, *prv_new;
+
+	dst = calloc(1, sizeof(*dst));
+	if (!dst)
+		return NULL;
+
+	HASH_ITER(hh, src->cur, cur_src, cur_tmp) {
+		cur_new = malloc(sizeof(*cur_new));
+		if (!cur_new)
+			goto err;
+		cur_new->key = cur_src->key;
+		cur_new->conn = cur_src->conn;
+		memset(&cur_new->hh, 0, sizeof(cur_new->hh));
+		HASH_ADD(hh, dst->cur, key, sizeof(cur_new->key), cur_new);
+	}
+
+	HASH_ITER(hh, src->prv, prv_src, prv_tmp) {
+		prv_new = malloc(sizeof(*prv_new));
+		if (!prv_new)
+			goto err;
+		prv_new->key = prv_src->key;
+		prv_new->conn = prv_src->conn;
+		memset(&prv_new->hh, 0, sizeof(prv_new->hh));
+		HASH_ADD(hh, dst->prv, key, sizeof(prv_new->key), prv_new);
+	}
+
+	return dst;
+
+err:
+	efa_reverse_av_snapshot_destroy(dst);
+	return NULL;
+}
+
+/**
+ * @brief Perform the add mutation on a snapshot (not yet published).
+ *
+ * This contains the same logic as the original efa_av_reverse_av_add but
+ * operates on the snapshot's cur/prv tables directly.
+ */
+static int
+efa_reverse_av_snapshot_do_add(struct efa_av *av,
+			       struct efa_reverse_av_snapshot *snap,
+			       struct efa_conn *conn)
 {
 	struct efa_cur_reverse_av *cur_entry;
 	struct efa_prv_reverse_av *prv_entry;
@@ -250,8 +334,8 @@ int efa_av_reverse_av_add(struct efa_av *av,
 	cur_key.qpn = conn->ep_addr->qpn;
 	cur_entry = NULL;
 
-	/* coverity[overflow_const : FALSE] - intentional unsigned wraparound in uthash Jenkins hash */
-	HASH_FIND(hh, *cur_reverse_av, &cur_key, sizeof(cur_key), cur_entry);
+	/* coverity[overflow_const : FALSE] */
+	HASH_FIND(hh, snap->cur, &cur_key, sizeof(cur_key), cur_entry);
 	if (!cur_entry) {
 		cur_entry = malloc(sizeof(*cur_entry));
 		if (!cur_entry) {
@@ -262,14 +346,11 @@ int efa_av_reverse_av_add(struct efa_av *av,
 		cur_entry->key.ahn = cur_key.ahn;
 		cur_entry->key.qpn = cur_key.qpn;
 		cur_entry->conn = conn;
-		HASH_ADD(hh, *cur_reverse_av, key, sizeof(cur_key), cur_entry);
-
+		HASH_ADD(hh, snap->cur, key, sizeof(cur_key), cur_entry);
 		return 0;
 	}
 
-	/* We used a static connid for all dgram endpoints, therefore cur_entry should always be NULL,
-	 * and only RDM endpoint can reach here. hence the following assertion
-	 */
+	/* Only RDM endpoints can have QPN reuse (dgram uses static connid) */
 	assert(av->domain->info_type == EFA_INFO_RDM);
 	prv_entry = malloc(sizeof(*prv_entry));
 	if (!prv_entry) {
@@ -281,56 +362,127 @@ int efa_av_reverse_av_add(struct efa_av *av,
 	prv_entry->key.qpn = cur_key.qpn;
 	prv_entry->key.connid = cur_entry->conn->ep_addr->qkey;
 	prv_entry->conn = cur_entry->conn;
-	HASH_ADD(hh, *prv_reverse_av, key, sizeof(prv_entry->key), prv_entry);
+	HASH_ADD(hh, snap->prv, key, sizeof(prv_entry->key), prv_entry);
 
 	cur_entry->conn = conn;
 	return 0;
 }
 
-/*
- * @brief Remove an address from the reverse AVs during fi_av_remove
- *
- * The address is not removed from the prv_reverse_av if it is found in
- * cur_reverse_av. Keeping the address in prv_reverse_av helps avoid QPN
- * collisions.
- *
- * @param[in]		av		EFA AV object
- * @param[in,out]	cur_reverse_av	Reverse AV with AHN and QPN as key
- * @param[in,out]	prv_reverse_av	Reverse AV with AHN, QPN and QKEY as key
- * @param[in]		conn		efa_conn object
- * @return		On success, return 0.
- * 			Otherwise, return a negative libfabric error code
+/**
+ * @brief Perform the remove mutation on a snapshot (not yet published).
  */
-void efa_av_reverse_av_remove(struct efa_cur_reverse_av **cur_reverse_av,
-				    struct efa_prv_reverse_av **prv_reverse_av,
-				    struct efa_conn *conn)
+static void
+efa_reverse_av_snapshot_do_remove(struct efa_reverse_av_snapshot *snap,
+				  struct efa_conn *conn)
 {
-	struct efa_cur_reverse_av *cur_reverse_av_entry;
-	struct efa_prv_reverse_av *prv_reverse_av_entry;
+	struct efa_cur_reverse_av *cur_entry;
+	struct efa_prv_reverse_av *prv_entry;
 	struct efa_cur_reverse_av_key cur_key;
 	struct efa_prv_reverse_av_key prv_key;
 
 	memset(&cur_key, 0, sizeof(cur_key));
 	cur_key.ahn = conn->ah->ahn;
 	cur_key.qpn = conn->ep_addr->qpn;
-	/* coverity[overflow_const : FALSE] - intentional unsigned wraparound in uthash Jenkins hash */
-	HASH_FIND(hh, *cur_reverse_av, &cur_key, sizeof(cur_key),
-		  cur_reverse_av_entry);
-	if (cur_reverse_av_entry && cur_reverse_av_entry->conn == conn) {
-		HASH_DEL(*cur_reverse_av, cur_reverse_av_entry);
-		free(cur_reverse_av_entry);
+	/* coverity[overflow_const : FALSE] */
+	HASH_FIND(hh, snap->cur, &cur_key, sizeof(cur_key), cur_entry);
+	if (cur_entry && cur_entry->conn == conn) {
+		HASH_DEL(snap->cur, cur_entry);
+		free(cur_entry);
 	} else {
 		memset(&prv_key, 0, sizeof(prv_key));
 		prv_key.ahn = conn->ah->ahn;
 		prv_key.qpn = conn->ep_addr->qpn;
 		prv_key.connid = conn->ep_addr->qkey;
-		HASH_FIND(hh, *prv_reverse_av, &prv_key, sizeof(prv_key),
-			  prv_reverse_av_entry);
-		assert(prv_reverse_av_entry &&
-		       prv_reverse_av_entry->conn == conn);
-		HASH_DEL(*prv_reverse_av, prv_reverse_av_entry);
-		free(prv_reverse_av_entry);
+		HASH_FIND(hh, snap->prv, &prv_key, sizeof(prv_key), prv_entry);
+		assert(prv_entry && prv_entry->conn == conn);
+		HASH_DEL(snap->prv, prv_entry);
+		free(prv_entry);
 	}
+}
+
+/*
+ * @brief Add an address to the reverse AVs (RCU write path).
+ *
+ * Clones the current snapshot, adds the entry to the clone, then atomically
+ * publishes the new snapshot. The old snapshot is freed on the next mutation.
+ *
+ * Caller must hold util_av.lock (or util_av_implicit.lock).
+ *
+ * @param[in]		av		EFA AV object
+ * @param[in,out]	published	Atomic pointer to the live snapshot
+ * @param[in,out]	old_slot	Pointer to the previous snapshot (for deferred free)
+ * @param[in]		conn		efa_conn object to add
+ * @return		0 on success, negative libfabric error on failure
+ */
+int efa_av_reverse_av_add(struct efa_av *av,
+			  struct efa_reverse_av_snapshot **published,
+			  struct efa_reverse_av_snapshot **old_slot,
+			  struct efa_conn *conn)
+{
+	struct efa_reverse_av_snapshot *cur_snap, *new_snap;
+	int ret;
+
+	cur_snap = *published;
+
+	new_snap = efa_reverse_av_snapshot_clone(cur_snap);
+	if (!new_snap)
+		return -FI_ENOMEM;
+
+	ret = efa_reverse_av_snapshot_do_add(av, new_snap, conn);
+	if (ret) {
+		efa_reverse_av_snapshot_destroy(new_snap);
+		return ret;
+	}
+
+	/* Publish: wmb ensures all clone writes are visible before the pointer */
+	ofi_wmb();
+	*published = new_snap;
+
+	/* Two-generation reclaim: free the snapshot from the previous write */
+	efa_reverse_av_snapshot_destroy(*old_slot);
+	*old_slot = cur_snap;
+
+	return 0;
+}
+
+/*
+ * @brief Remove an address from the reverse AVs (RCU write path).
+ *
+ * Clones the current snapshot, removes the entry from the clone, then
+ * atomically publishes the new snapshot.
+ *
+ * Caller must hold util_av.lock (or util_av_implicit.lock).
+ *
+ * @param[in]		av		EFA AV object
+ * @param[in,out]	published	Atomic pointer to the live snapshot
+ * @param[in,out]	old_slot	Pointer to the previous snapshot (for deferred free)
+ * @param[in]		conn		efa_conn object to remove
+ */
+void efa_av_reverse_av_remove(struct efa_av *av,
+			      struct efa_reverse_av_snapshot **published,
+			      struct efa_reverse_av_snapshot **old_slot,
+			      struct efa_conn *conn)
+{
+	struct efa_reverse_av_snapshot *cur_snap, *new_snap;
+
+	cur_snap = *published;
+
+	new_snap = efa_reverse_av_snapshot_clone(cur_snap);
+	if (!new_snap) {
+		EFA_WARN(FI_LOG_AV,
+			 "Failed to clone reverse_av snapshot for remove. "
+			 "Falling back to in-place mutation (data race risk).\n");
+		efa_reverse_av_snapshot_do_remove(cur_snap, conn);
+		return;
+	}
+
+	efa_reverse_av_snapshot_do_remove(new_snap, conn);
+
+	ofi_wmb();
+	*published = new_snap;
+
+	efa_reverse_av_snapshot_destroy(*old_slot);
+	*old_slot = cur_snap;
 }
 
 
@@ -418,8 +570,8 @@ static int efa_conn_implicit_to_explicit(struct efa_av *av,
 	assert(HASH_CNT(hh, implicit_conn->ep_peer_map) == 0);
 
 	/* Handle reverse AV and AV ref counts */
-	efa_av_reverse_av_remove(&av->cur_reverse_av_implicit,
-				 &av->prv_reverse_av_implicit, implicit_conn);
+	efa_av_reverse_av_remove(av, &av->reverse_av_implicit,
+				 &av->reverse_av_implicit_old, implicit_conn);
 
 	dlist_remove(&implicit_av_entry->conn.implicit_av_lru_entry);
 
@@ -432,7 +584,7 @@ static int efa_conn_implicit_to_explicit(struct efa_av *av,
 		return err;
 	}
 
-	err = efa_av_reverse_av_add(av, &av->cur_reverse_av, &av->prv_reverse_av,
+	err = efa_av_reverse_av_add(av, &av->reverse_av, &av->reverse_av_old,
 				    explicit_conn);
 	if (err)
 		return err;
@@ -824,32 +976,37 @@ static struct fi_ops_av efa_av_ops = {
 
 static void efa_av_close_reverse_av(struct efa_av *av)
 {
+	struct efa_reverse_av_snapshot *snap;
 	struct efa_cur_reverse_av *cur_entry, *curtmp;
 	struct efa_prv_reverse_av *prv_entry, *prvtmp;
 
+	/* Release connections from the explicit reverse AV */
 	ofi_genlock_lock(&av->util_av.lock);
-
-	HASH_ITER(hh, av->cur_reverse_av, cur_entry, curtmp) {
+	snap = av->reverse_av;
+	HASH_ITER(hh, snap->cur, cur_entry, curtmp) {
 		efa_conn_release(av, cur_entry->conn, false);
 	}
-
-	HASH_ITER(hh, av->prv_reverse_av, prv_entry, prvtmp) {
+	HASH_ITER(hh, snap->prv, prv_entry, prvtmp) {
 		efa_conn_release(av, prv_entry->conn, false);
 	}
-
 	ofi_genlock_unlock(&av->util_av.lock);
 
+	/* Release connections from the implicit reverse AV */
 	EFA_GENLOCK_LOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
-
-	HASH_ITER(hh, av->cur_reverse_av_implicit, cur_entry, curtmp) {
+	snap = av->reverse_av_implicit;
+	HASH_ITER(hh, snap->cur, cur_entry, curtmp) {
 		efa_conn_release(av, cur_entry->conn, true);
 	}
-
-	HASH_ITER(hh, av->prv_reverse_av_implicit, prv_entry, prvtmp) {
+	HASH_ITER(hh, snap->prv, prv_entry, prvtmp) {
 		efa_conn_release(av, prv_entry->conn, true);
 	}
-
 	EFA_GENLOCK_UNLOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
+
+	/* Destroy all snapshots (current + old generation) */
+	efa_reverse_av_snapshot_destroy(av->reverse_av);
+	efa_reverse_av_snapshot_destroy(av->reverse_av_old);
+	efa_reverse_av_snapshot_destroy(av->reverse_av_implicit);
+	efa_reverse_av_snapshot_destroy(av->reverse_av_implicit_old);
 }
 
 static int efa_av_close(struct fid *fid)
@@ -1012,6 +1169,17 @@ int efa_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
 	av->type = attr->type;
 	av->implicit_av_size = efa_env.implicit_av_size;
 	av->shm_used = 0;
+
+	/* Initialize RCU reverse AV snapshots (empty) */
+	av->reverse_av_old = NULL;
+	av->reverse_av_implicit_old = NULL;
+	av->reverse_av = efa_reverse_av_snapshot_create();
+	av->reverse_av_implicit = efa_reverse_av_snapshot_create();
+	if (!av->reverse_av || !av->reverse_av_implicit) {
+		EFA_WARN(FI_LOG_AV, "Failed to allocate reverse_av snapshots\n");
+		ret = -FI_ENOMEM;
+		goto err_close_util_av;
+	}
 
 	*av_fid = &av->util_av.av_fid;
 	(*av_fid)->fid.fclass = FI_CLASS_AV;

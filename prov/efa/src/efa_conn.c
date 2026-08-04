@@ -218,8 +218,8 @@ struct efa_conn *efa_conn_alloc(struct efa_av *av, struct efa_ep_addr *raw_addr,
 	OFI_TSA_NO_ANALYSIS // clang cannot reason about conditional locking statically
 {
 	struct util_av *util_av;
-	struct efa_cur_reverse_av **cur_reverse_av;
-	struct efa_prv_reverse_av **prv_reverse_av;
+	struct efa_reverse_av_snapshot **published;
+	struct efa_reverse_av_snapshot **old_slot;
 	struct util_av_entry *util_av_entry = NULL;
 	struct efa_av_entry *efa_av_entry = NULL;
 	struct efa_conn *conn;
@@ -232,13 +232,13 @@ struct efa_conn *efa_conn_alloc(struct efa_av *av, struct efa_ep_addr *raw_addr,
 	if (insert_implicit_av) {
 		assert(EFA_GENLOCK_HELD(&av->util_av_implicit.lock, efa_implicit_av_lock_sym));
 		util_av = &av->util_av_implicit;
-		cur_reverse_av = &av->cur_reverse_av_implicit;
-		prv_reverse_av = &av->prv_reverse_av_implicit;
+		published = &av->reverse_av_implicit;
+		old_slot = &av->reverse_av_implicit_old;
 	} else {
 		assert(ofi_genlock_held(&av->util_av.lock));
 		util_av = &av->util_av;
-		cur_reverse_av = &av->cur_reverse_av;
-		prv_reverse_av = &av->prv_reverse_av;
+		published = &av->reverse_av;
+		old_slot = &av->reverse_av_old;
 	}
 
 	err = ofi_av_insert_addr(util_av, raw_addr, &fi_addr);
@@ -298,7 +298,7 @@ struct efa_conn *efa_conn_alloc(struct efa_av *av, struct efa_ep_addr *raw_addr,
 		}
 	}
 
-	err = efa_av_reverse_av_add(av, cur_reverse_av, prv_reverse_av, conn);
+	err = efa_av_reverse_av_add(av, published, old_slot, conn);
 	if (err) {
 		if (av->domain->info_type == EFA_INFO_RDM)
 			efa_conn_rdm_deinit(av, conn);
@@ -328,12 +328,12 @@ void efa_conn_release_reverse_av(struct efa_av *av, struct efa_conn *conn,
 {
 	if (release_from_implicit_av) {
 		assert(EFA_GENLOCK_HELD(&av->util_av_implicit.lock, efa_implicit_av_lock_sym));
-		efa_av_reverse_av_remove(&av->cur_reverse_av_implicit,
-					 &av->prv_reverse_av_implicit, conn);
+		efa_av_reverse_av_remove(av, &av->reverse_av_implicit,
+					 &av->reverse_av_implicit_old, conn);
 	} else {
 		assert(ofi_genlock_held(&av->util_av.lock));
-		efa_av_reverse_av_remove(&av->cur_reverse_av,
-					 &av->prv_reverse_av, conn);
+		efa_av_reverse_av_remove(av, &av->reverse_av,
+					 &av->reverse_av_old, conn);
 	}
 }
 

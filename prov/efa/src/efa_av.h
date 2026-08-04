@@ -5,6 +5,7 @@
 #define EFA_AV_H
 
 #include <infiniband/verbs.h>
+#include <ofi_mb.h>
 #include "rdm/efa_rdm_protocol.h"
 #include "rdm/efa_rdm_peer.h"
 #include "efa_ah.h"
@@ -59,6 +60,22 @@ struct efa_prv_reverse_av {
 	UT_hash_handle hh;
 };
 
+/**
+ * An immutable snapshot of the reverse AV hash tables.
+ *
+ * Once published (stored into efa_av via atomic store-release), a snapshot
+ * is read-only. Readers load the pointer with acquire semantics and traverse
+ * the hash tables without any lock.
+ *
+ * Writers (under util_av.lock) clone the current snapshot, mutate the clone,
+ * then atomically publish it. The previous snapshot is freed on the next write
+ * (two-generation reclamation).
+ */
+struct efa_reverse_av_snapshot {
+	struct efa_cur_reverse_av *cur;
+	struct efa_prv_reverse_av *prv;
+};
+
 struct efa_av {
 	struct fid_av *shm_rdm_av;
 	struct efa_domain *domain;
@@ -66,18 +83,22 @@ struct efa_av {
 	enum fi_av_type type;
 	/* cur_reverse_av is a map from (ahn + qpn) to current (latest) efa_conn.
 	 * prv_reverse_av is a map from (ahn + qpn + connid) to all previous efa_conns.
-	 * cur_reverse_av is faster to search because its key size is smaller
+	 * cur_reverse_av is faster to search because its key size is smaller.
+	 *
+	 * These are managed via RCU: readers load the snapshot pointer with
+	 * acquire semantics (lock-free), writers clone-mutate-swap under
+	 * util_av.lock and defer-free the old snapshot.
 	 */
-	struct efa_cur_reverse_av *cur_reverse_av;
-	struct efa_prv_reverse_av *prv_reverse_av;
+	struct efa_reverse_av_snapshot *reverse_av;
+	struct efa_reverse_av_snapshot *reverse_av_old;
 	struct util_av util_av;
 
 	/* implicit AV is used when receiving messages from peers not explicity
 	 * inserted by the application
 	 */
 	struct util_av util_av_implicit;
-	struct efa_cur_reverse_av *cur_reverse_av_implicit;
-	struct efa_prv_reverse_av *prv_reverse_av_implicit;
+	struct efa_reverse_av_snapshot *reverse_av_implicit;
+	struct efa_reverse_av_snapshot *reverse_av_implicit_old;
 
 	size_t implicit_av_size;
 	struct dlist_entry implicit_av_lru_list OFI_TSA_GUARDED_BY(efa_implicit_av_lock_sym);
@@ -111,13 +132,17 @@ fi_addr_t efa_av_reverse_lookup_rdm_implicit(struct efa_av *av, uint16_t ahn,
 fi_addr_t efa_av_reverse_lookup(struct efa_av *av, uint16_t ahn, uint16_t qpn);
 
 int efa_av_reverse_av_add(struct efa_av *av,
-			  struct efa_cur_reverse_av **cur_reverse_av,
-			  struct efa_prv_reverse_av **prv_reverse_av,
+			  struct efa_reverse_av_snapshot **published,
+			  struct efa_reverse_av_snapshot **old_slot,
 			  struct efa_conn *conn);
 
-void efa_av_reverse_av_remove(struct efa_cur_reverse_av **cur_reverse_av,
-				    struct efa_prv_reverse_av **prv_reverse_av,
-				    struct efa_conn *conn);
+void efa_av_reverse_av_remove(struct efa_av *av,
+			      struct efa_reverse_av_snapshot **published,
+			      struct efa_reverse_av_snapshot **old_slot,
+			      struct efa_conn *conn);
+
+struct efa_reverse_av_snapshot *efa_reverse_av_snapshot_create(void);
+void efa_reverse_av_snapshot_destroy(struct efa_reverse_av_snapshot *snap);
 
 void efa_av_implicit_av_lru_conn_move(struct efa_av *av,
 					struct efa_conn *conn)
