@@ -72,14 +72,19 @@ fi_addr_t efa_av_reverse_lookup(struct efa_av *av, uint16_t ahn, uint16_t qpn)
 {
 	struct efa_cur_reverse_av *cur_entry;
 	struct efa_cur_reverse_av_key cur_key;
+	fi_addr_t fi_addr;
 
 	memset(&cur_key, 0, sizeof(cur_key));
 	cur_key.ahn = ahn;
 	cur_key.qpn = qpn;
+
+	EFA_GENLOCK_RDLOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 	/* coverity[overflow_const : FALSE] - intentional unsigned wraparound in uthash Jenkins hash */
 	HASH_FIND(hh, av->cur_reverse_av, &cur_key, sizeof(cur_key), cur_entry);
+	fi_addr = (OFI_LIKELY(!!cur_entry)) ? cur_entry->conn->fi_addr : FI_ADDR_NOTAVAIL;
+	EFA_GENLOCK_RDUNLOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 
-	return (OFI_LIKELY(!!cur_entry)) ? cur_entry->conn->fi_addr : FI_ADDR_NOTAVAIL;
+	return fi_addr;
 }
 
 static inline struct efa_conn *
@@ -87,6 +92,7 @@ efa_av_reverse_lookup_rdm_conn(struct efa_cur_reverse_av **cur_reverse_av,
 			       struct efa_prv_reverse_av **prv_reverse_av,
 			       uint16_t ahn, uint16_t qpn,
 			       struct efa_rdm_pke *pkt_entry)
+	OFI_TSA_NO_ANALYSIS // clang cannot reason about conditional lock called by both explicit and implicit
 {
 	uint32_t *connid;
 	struct efa_cur_reverse_av *cur_entry;
@@ -153,14 +159,15 @@ fi_addr_t efa_av_reverse_lookup_rdm(struct efa_av *av, uint16_t ahn,
 				    uint16_t qpn, struct efa_rdm_pke *pkt_entry)
 {
 	struct efa_conn *conn;
+	fi_addr_t fi_addr;
 
+	EFA_GENLOCK_RDLOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 	conn = efa_av_reverse_lookup_rdm_conn(
 		&av->cur_reverse_av, &av->prv_reverse_av, ahn, qpn, pkt_entry);
+	fi_addr = (OFI_LIKELY(!!conn)) ? conn->fi_addr : FI_ADDR_NOTAVAIL;
+	EFA_GENLOCK_RDUNLOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 
-	if (OFI_LIKELY(!!conn))
-		return conn->fi_addr;
-
-	return FI_ADDR_NOTAVAIL;
+	return fi_addr;
 }
 
 /**
@@ -430,8 +437,10 @@ static int efa_conn_implicit_to_explicit(struct efa_av *av,
 		return err;
 	}
 
+	EFA_GENLOCK_LOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 	err = efa_av_reverse_av_add(av, &av->cur_reverse_av, &av->prv_reverse_av,
 				    explicit_conn);
+	EFA_GENLOCK_UNLOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 	if (err)
 		return err;
 
@@ -827,6 +836,7 @@ static struct fi_ops_av efa_av_ops = {
 };
 
 static void efa_av_close_reverse_av(struct efa_av *av)
+	OFI_TSA_NO_ANALYSIS
 {
 	struct efa_cur_reverse_av *cur_entry, *curtmp;
 	struct efa_prv_reverse_av *prv_entry, *prvtmp;
@@ -903,6 +913,7 @@ static int efa_av_close(struct fid *fid)
 		free(ep_addr_hashable);
 	}
 
+	ofi_genlock_destroy(&av->reverse_av_lock);
 	free(av);
 	return err;
 }
@@ -1024,6 +1035,14 @@ int efa_av_open(struct fid_domain *domain_fid, struct fi_av_attr *attr,
 	av->type = attr->type;
 	av->implicit_av_size = efa_env.implicit_av_size;
 	av->shm_used = 0;
+
+	ret = ofi_genlock_init(&av->reverse_av_lock,
+			       efa_domain->util_domain.threading == FI_THREAD_DOMAIN &&
+			       efa_domain->util_domain.control_progress ==
+				       FI_PROGRESS_CONTROL_UNIFIED ?
+			       OFI_LOCK_NOOP : OFI_LOCK_RWLOCK);
+	if (ret)
+		goto err_close_util_av;
 
 	*av_fid = &av->util_av.av_fid;
 	(*av_fid)->fid.fclass = FI_CLASS_AV;

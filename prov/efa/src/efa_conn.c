@@ -301,7 +301,11 @@ struct efa_conn *efa_conn_alloc(struct efa_av *av, struct efa_ep_addr *raw_addr,
 		}
 	}
 
+	if (!insert_implicit_av)
+		EFA_GENLOCK_LOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 	err = efa_av_reverse_av_add(av, cur_reverse_av, prv_reverse_av, conn);
+	if (!insert_implicit_av)
+		EFA_GENLOCK_UNLOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 	if (err) {
 		if (av->domain->info_type == EFA_INFO_RDM) {
 			assert(ofi_genlock_held(&((struct efa_rdm_domain *) av->domain)->srx_lock));
@@ -336,9 +340,10 @@ void efa_conn_release_reverse_av(struct efa_av *av, struct efa_conn *conn,
 		efa_av_reverse_av_remove(&av->cur_reverse_av_implicit,
 					 &av->prv_reverse_av_implicit, conn);
 	} else {
-		assert(ofi_genlock_held(&av->util_av.lock));
+		EFA_GENLOCK_LOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 		efa_av_reverse_av_remove(&av->cur_reverse_av,
 					 &av->prv_reverse_av, conn);
+		EFA_GENLOCK_UNLOCK(&av->reverse_av_lock, efa_reverse_av_lock_sym);
 	}
 }
 

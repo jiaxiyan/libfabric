@@ -61,8 +61,24 @@ efa_genlock_acquire(struct ofi_genlock *lock, struct ofi_tsa_lock_symbol *sym)
 }
 
 static inline void
+efa_genlock_acquire_shared(struct ofi_genlock *lock, struct ofi_tsa_lock_symbol *sym)
+	OFI_TSA_ANNOTATION(acquire_shared_capability(*sym)) OFI_TSA_NO_ANALYSIS
+{
+	(void) sym;
+	ofi_genlock_rdlock(lock);
+}
+
+static inline void
 efa_genlock_release(struct ofi_genlock *lock, struct ofi_tsa_lock_symbol *sym)
 	OFI_TSA_RELEASE(*sym) OFI_TSA_NO_ANALYSIS
+{
+	(void) sym;
+	ofi_genlock_unlock(lock);
+}
+
+static inline void
+efa_genlock_release_shared(struct ofi_genlock *lock, struct ofi_tsa_lock_symbol *sym)
+	OFI_TSA_ANNOTATION(release_shared_capability(*sym)) OFI_TSA_NO_ANALYSIS
 {
 	(void) sym;
 	ofi_genlock_unlock(lock);
@@ -77,7 +93,9 @@ efa_genlock_held(struct ofi_genlock *lock, struct ofi_tsa_lock_symbol *sym)
 }
 
 #define EFA_GENLOCK_LOCK(lock, sym)	efa_genlock_acquire((lock), &(sym))
+#define EFA_GENLOCK_RDLOCK(lock, sym)	efa_genlock_acquire_shared((lock), &(sym))
 #define EFA_GENLOCK_UNLOCK(lock, sym)	efa_genlock_release((lock), &(sym))
+#define EFA_GENLOCK_RDUNLOCK(lock, sym)	efa_genlock_release_shared((lock), &(sym))
 #define EFA_GENLOCK_HELD(lock, sym)	efa_genlock_held((lock), &(sym))
 
 #else /* !OFI_THREAD_SAFETY_ANALYSIS */
@@ -86,13 +104,16 @@ efa_genlock_held(struct ofi_genlock *lock, struct ofi_tsa_lock_symbol *sym)
 #define OFI_TSA_LOCK_SYMBOL_DEFINE(name)	struct ofi_tsa_lock_symbol_unused_##name
 
 #define EFA_GENLOCK_LOCK(lock, sym)	ofi_genlock_lock(lock)
+#define EFA_GENLOCK_RDLOCK(lock, sym)	ofi_genlock_rdlock(lock)
 #define EFA_GENLOCK_UNLOCK(lock, sym)	ofi_genlock_unlock(lock)
+#define EFA_GENLOCK_RDUNLOCK(lock, sym)	ofi_genlock_unlock(lock)
 #define EFA_GENLOCK_HELD(lock, sym)	ofi_genlock_held(lock)
 
 #endif /* OFI_THREAD_SAFETY_ANALYSIS */
 
 /* EFA lock symbols (one per lock role). */
 OFI_TSA_LOCK_SYMBOL_DECLARE(efa_qp_table_lock_sym);
+OFI_TSA_LOCK_SYMBOL_DECLARE(efa_reverse_av_lock_sym);
 OFI_TSA_LOCK_SYMBOL_DECLARE(efa_implicit_av_lock_sym);
 
 #endif /* EFA_THREAD_ANNOTATIONS_H */
