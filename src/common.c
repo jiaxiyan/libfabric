@@ -117,6 +117,9 @@ int ofi_genlock_init(struct ofi_genlock *lock,
 		/* Use mutex for debug no-op support */
 		ret = ofi_mutex_init(&lock->base.mutex);
 		break;
+	case OFI_LOCK_RWLOCK:
+		ret = ofi_rwlock_init(&lock->base.rwlock);
+		break;
 	case OFI_LOCK_NONE:
 		ret = 0;
 		break;
@@ -137,6 +140,9 @@ void ofi_genlock_destroy(struct ofi_genlock *lock)
 	case OFI_LOCK_MUTEX:
 	case OFI_LOCK_NOOP:
 		ofi_mutex_destroy(&lock->base.mutex);
+		break;
+	case OFI_LOCK_RWLOCK:
+		ofi_rwlock_destroy(&lock->base.rwlock);
 		break;
 	case OFI_LOCK_NONE:
 		break;

@@ -331,6 +331,44 @@ static inline int ofi_mutex_held_op(ofi_mutex_t *lock)
 
 
 /*
+ * Read-write lock
+ */
+#define ofi_rwlock_t_ pthread_rwlock_t
+#define ofi_rwlock_init_(lock) pthread_rwlock_init(lock, NULL)
+#define ofi_rwlock_destroy_(lock) pthread_rwlock_destroy(lock)
+#define ofi_rwlock_rdlock_(lock) pthread_rwlock_rdlock(lock)
+#define ofi_rwlock_wrlock_(lock) pthread_rwlock_wrlock(lock)
+#define ofi_rwlock_unlock_(lock) pthread_rwlock_unlock(lock)
+
+typedef ofi_rwlock_t_ ofi_rwlock_t;
+
+static inline int ofi_rwlock_init(ofi_rwlock_t *lock)
+{
+	return ofi_rwlock_init_(lock);
+}
+
+static inline void ofi_rwlock_destroy(ofi_rwlock_t *lock)
+{
+	ofi_rwlock_destroy_(lock);
+}
+
+static inline void ofi_rwlock_rdlock(ofi_rwlock_t *lock)
+{
+	ofi_rwlock_rdlock_(lock);
+}
+
+static inline void ofi_rwlock_wrlock(ofi_rwlock_t *lock)
+{
+	ofi_rwlock_wrlock_(lock);
+}
+
+static inline void ofi_rwlock_unlock(ofi_rwlock_t *lock)
+{
+	ofi_rwlock_unlock_(lock);
+}
+
+
+/*
  * Generic lock abstraction
  * Caller selects lock implementation at runtime
  */
@@ -339,6 +377,7 @@ enum ofi_lock_type {
 	OFI_LOCK_SPINLOCK,
 	OFI_LOCK_NOOP,
 	OFI_LOCK_NONE,
+	OFI_LOCK_RWLOCK,
 };
 
 struct ofi_genlock {
@@ -346,6 +385,7 @@ struct ofi_genlock {
 	union {
 		ofi_mutex_t	mutex;
 		ofi_spin_t	spinlock;
+		ofi_rwlock_t	rwlock;
 	} base;
 };
 
@@ -362,6 +402,7 @@ static inline int ofi_genlock_held(struct ofi_genlock *lock)
 	case OFI_LOCK_NOOP:
 		/* Use mutex for debug no-op support */
 		return ofi_mutex_held_op(&lock->base.mutex);
+	case OFI_LOCK_RWLOCK:
 	case OFI_LOCK_NONE:
 	default:
 		return 1;
@@ -381,6 +422,9 @@ static inline void ofi_genlock_lock(struct ofi_genlock *lock)
 		/* Use mutex for debug no-op support */
 		ofi_mutex_lock_noop(&lock->base.mutex);
 		break;
+	case OFI_LOCK_RWLOCK:
+		ofi_rwlock_wrlock(&lock->base.rwlock);
+		break;
 	case OFI_LOCK_NONE:
 	default:
 		break;
@@ -399,6 +443,34 @@ static inline void ofi_genlock_unlock(struct ofi_genlock *lock)
 	case OFI_LOCK_NOOP:
 		/* Use mutex for debug no-op support */
 		ofi_mutex_unlock_noop(&lock->base.mutex);
+		break;
+	case OFI_LOCK_RWLOCK:
+		ofi_rwlock_unlock(&lock->base.rwlock);
+		break;
+	case OFI_LOCK_NONE:
+	default:
+		break;
+	}
+}
+
+/*
+ * Acquire a shared (read) lock. Only meaningful for OFI_LOCK_RWLOCK;
+ * all other lock types fall back to exclusive lock behavior.
+ */
+static inline void ofi_genlock_rdlock(struct ofi_genlock *lock)
+{
+	switch (lock->lock_type) {
+	case OFI_LOCK_RWLOCK:
+		ofi_rwlock_rdlock(&lock->base.rwlock);
+		break;
+	case OFI_LOCK_SPINLOCK:
+		ofi_spin_lock_op(&lock->base.spinlock);
+		break;
+	case OFI_LOCK_MUTEX:
+		ofi_mutex_lock_op(&lock->base.mutex);
+		break;
+	case OFI_LOCK_NOOP:
+		ofi_mutex_lock_noop(&lock->base.mutex);
 		break;
 	case OFI_LOCK_NONE:
 	default:
