@@ -740,6 +740,7 @@ enum ibv_wc_status efa_rdm_cq_process_wc(struct efa_ibv_cq *cq, struct efa_rdm_e
 	enum ibv_wc_status status = cq->ibv_cq_ex->status;
 	enum ibv_wc_opcode opcode = efa_ibv_cq_wc_read_opcode(cq);
 	struct efa_rdm_pke *pkt_entry = efa_rdm_cq_get_pke_from_wr_id(cq, wr_id);
+	bool is_recv = (opcode == IBV_WC_RECV || opcode == IBV_WC_RECV_RDMA_WITH_IMM);
 
 	int prov_errno;
 
@@ -754,6 +755,16 @@ enum ibv_wc_status efa_rdm_cq_process_wc(struct efa_ibv_cq *cq, struct efa_rdm_e
 				   efa_rdm_pkt_type_of_pke(pkt_entry));
 	}
 #endif
+
+	/*
+	 * Lock ordering: srx_lock (domain) -> util_ep.lock (per-EP).
+	 * RX completions may trigger SRX matching (get_msg/queue_msg)
+	 * which must be serialized with fi_recv via srx_lock.
+	 * TX completions only need util_ep.lock for EP state.
+	 */
+	if (is_recv)
+		ofi_genlock_lock(&efa_rdm_ep_rdm_domain(ep)->srx_lock);
+	ofi_genlock_lock(&ep->base_ep.util_ep.lock);
 
 	if (OFI_UNLIKELY(status != IBV_WC_SUCCESS)) {
 		prov_errno = efa_rdm_cq_process_prov_errno(cq, pkt_entry ? pkt_entry->peer : NULL);
@@ -839,6 +850,9 @@ enum ibv_wc_status efa_rdm_cq_process_wc(struct efa_ibv_cq *cq, struct efa_rdm_e
 			assert(0 && "Unhandled cq type");
 		}
 	}
+	ofi_genlock_unlock(&ep->base_ep.util_ep.lock);
+	if (is_recv)
+		ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(ep)->srx_lock);
 	return status;
 }
 
@@ -928,17 +942,16 @@ int efa_rdm_cq_poll_ibv_cq(ssize_t cqe_to_process, struct efa_ibv_cq *ibv_cq)
 static ssize_t efa_rdm_cq_readfrom(struct fid_cq *cq_fid, void *buf, size_t count, fi_addr_t *src_addr)
 {
 	struct efa_rdm_cq *cq;
-	ssize_t ret;
 	struct efa_domain *domain;
+	ssize_t ret;
 
 	cq = container_of(cq_fid, struct efa_rdm_cq, efa_cq.util_cq.cq_fid.fid);
 
-	domain = container_of(cq->efa_cq.util_cq.domain, struct efa_domain, util_domain);
-
-	ofi_genlock_lock(&((struct efa_rdm_domain *) domain)->srx_lock);
-
 	if (cq->shm_cq) {
+		domain = container_of(cq->efa_cq.util_cq.domain, struct efa_domain, util_domain);
+		ofi_genlock_lock(&((struct efa_rdm_domain *) domain)->srx_lock);
 		fi_cq_read(cq->shm_cq, NULL, 0);
+		ofi_genlock_unlock(&((struct efa_rdm_domain *) domain)->srx_lock);
 
 		/*
 		 * fi_cq_read(cq->shm_cq, NULL, 0) will progress shm ep and write
@@ -948,15 +961,10 @@ static ssize_t efa_rdm_cq_readfrom(struct fid_cq *cq_fid, void *buf, size_t coun
 		ret = ofi_cq_read_entries(&cq->efa_cq.util_cq, buf, count, src_addr);
 
 		if (ret > 0)
-			goto out;
+			return ret;
 	}
 
-	ret = ofi_cq_readfrom(&cq->efa_cq.util_cq.cq_fid, buf, count, src_addr);
-
-out:
-	ofi_genlock_unlock(&((struct efa_rdm_domain *) domain)->srx_lock);
-
-	return ret;
+	return ofi_cq_readfrom(&cq->efa_cq.util_cq.cq_fid, buf, count, src_addr);
 }
 
 static int efa_rdm_cq_poll_events(struct efa_rdm_cq *cq, int timeout)

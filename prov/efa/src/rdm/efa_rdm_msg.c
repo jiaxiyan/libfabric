@@ -177,7 +177,8 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, const struct fi_msg *msg
 	assert(msg->iov_count <= ep->base_ep.info->tx_attr->iov_limit);
 
 	efa_perfset_start(ep, perf_efa_tx);
-	assert(ofi_genlock_held(&efa_rdm_ep_rdm_domain(ep)->srx_lock));
+
+	ofi_genlock_lock(&ep->base_ep.util_ep.lock);
 
 	peer = efa_rdm_ep_get_peer_explicit(ep, msg->addr);
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
@@ -223,6 +224,7 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, const struct fi_msg *msg
 	}
 
 out:
+	ofi_genlock_unlock(&ep->base_ep.util_ep.lock);
 	efa_perfset_end(ep, perf_efa_tx);
 	return err;
 }
@@ -248,11 +250,9 @@ ssize_t efa_rdm_msg_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, msg->addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 			shm_msg = (struct fi_msg *)msg;
 			if (msg->desc) {
 				efa_desc = msg->desc;
@@ -272,7 +272,6 @@ ssize_t efa_rdm_msg_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
 
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, msg, 0, ofi_op_msg, flags, 0);
 
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -293,12 +292,10 @@ ssize_t efa_rdm_msg_sendv(struct fid_ep *ep, const struct iovec *iov,
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
-			if (desc)
+					if (desc)
 				efa_rdm_get_desc_for_shm(count, desc, shm_desc);
 			return fi_sendv(efa_rdm_ep->shm_ep, iov, shm_desc, count, shm_addr, context);
 		}
@@ -306,7 +303,6 @@ ssize_t efa_rdm_msg_sendv(struct fid_ep *ep, const struct iovec *iov,
 
 	efa_rdm_msg_construct(&msg, iov, desc, count, dest_addr, context, 0);
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg, efa_rdm_tx_flags(efa_rdm_ep), 0);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -330,12 +326,10 @@ ssize_t efa_rdm_msg_send(struct fid_ep *ep, const void *buf, size_t len,
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
-			if (desc)
+					if (desc)
 				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
 			return fi_send(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, shm_addr, context);
 		}
@@ -343,7 +337,6 @@ ssize_t efa_rdm_msg_send(struct fid_ep *ep, const void *buf, size_t len,
 
 	efa_rdm_msg_construct(&msg, &iov, &desc, 1, dest_addr, context, 0);
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg, efa_rdm_tx_flags(efa_rdm_ep), 0);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -369,12 +362,10 @@ ssize_t efa_rdm_msg_senddata(struct fid_ep *ep, const void *buf, size_t len,
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
-			if (desc)
+					if (desc)
 				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
 			return fi_senddata(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, data, shm_addr, context);
 		}
@@ -383,7 +374,6 @@ ssize_t efa_rdm_msg_senddata(struct fid_ep *ep, const void *buf, size_t len,
 	efa_rdm_msg_construct(&msg, &iov, &desc, 1, dest_addr, context, data);
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg,
 				    efa_rdm_tx_flags(efa_rdm_ep) | FI_REMOTE_CQ_DATA, 0);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -400,11 +390,9 @@ ssize_t efa_rdm_msg_inject(struct fid_ep *ep, const void *buf, size_t len,
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->base_ep.inject_msg_size);
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 			return fi_inject(efa_rdm_ep->shm_ep, buf, len, shm_addr);
 		}
 	}
@@ -417,7 +405,6 @@ ssize_t efa_rdm_msg_inject(struct fid_ep *ep, const void *buf, size_t len,
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg,
 				    efa_rdm_tx_flags(efa_rdm_ep) | FI_INJECT,
 				    EFA_RDM_TXE_NO_COMPLETION);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -435,11 +422,9 @@ ssize_t efa_rdm_msg_injectdata(struct fid_ep *ep, const void *buf,
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->base_ep.inject_msg_size);
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 			return fi_injectdata(efa_rdm_ep->shm_ep, buf, len, data, shm_addr);
 		}
 	}
@@ -453,7 +438,6 @@ ssize_t efa_rdm_msg_injectdata(struct fid_ep *ep, const void *buf,
 				    efa_rdm_tx_flags(efa_rdm_ep) |
 				    FI_REMOTE_CQ_DATA | FI_INJECT,
 				    EFA_RDM_TXE_NO_COMPLETION);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -479,12 +463,9 @@ ssize_t efa_rdm_msg_tsendmsg(struct fid_ep *ep_fid, const struct fi_msg_tagged *
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, tmsg->addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(
-				&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 			shm_tmsg = (struct fi_msg_tagged *) tmsg;
 			if (tmsg->desc) {
 				efa_desc = tmsg->desc;
@@ -505,7 +486,6 @@ ssize_t efa_rdm_msg_tsendmsg(struct fid_ep *ep_fid, const struct fi_msg_tagged *
 
 	efa_rdm_msg_construct(&msg, tmsg->msg_iov, tmsg->desc, tmsg->iov_count, tmsg->addr, tmsg->context, tmsg->data);
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tmsg->tag, ofi_op_tagged, flags, 0);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -526,12 +506,10 @@ ssize_t efa_rdm_msg_tsendv(struct fid_ep *ep_fid, const struct iovec *iov,
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
-			if (desc)
+					if (desc)
 				efa_rdm_get_desc_for_shm(count, desc, shm_desc);
 			return fi_tsendv(efa_rdm_ep->shm_ep, iov, desc? shm_desc : NULL, count, shm_addr, tag, context);
 		}
@@ -539,7 +517,6 @@ ssize_t efa_rdm_msg_tsendv(struct fid_ep *ep_fid, const struct iovec *iov,
 
 	efa_rdm_msg_construct(&msg, iov, desc, count, dest_addr, context, 0);
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged, efa_rdm_tx_flags(efa_rdm_ep), 0);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -564,12 +541,10 @@ ssize_t efa_rdm_msg_tsend(struct fid_ep *ep_fid, const void *buf, size_t len,
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
-			if (desc)
+					if (desc)
 				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
 			return fi_tsend(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, shm_addr, tag, context);
 		}
@@ -577,7 +552,6 @@ ssize_t efa_rdm_msg_tsend(struct fid_ep *ep_fid, const void *buf, size_t len,
 
 	efa_rdm_msg_construct(&msg, &msg_iov, &desc, 1, dest_addr, context, 0);
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged, efa_rdm_tx_flags(efa_rdm_ep), 0);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -602,12 +576,10 @@ ssize_t efa_rdm_msg_tsenddata(struct fid_ep *ep_fid, const void *buf, size_t len
 	if (ret)
 		return ret;
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
-			if (desc)
+					if (desc)
 				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
 			return fi_tsenddata(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, data, shm_addr, tag, context);
 		}
@@ -616,7 +588,6 @@ ssize_t efa_rdm_msg_tsenddata(struct fid_ep *ep_fid, const void *buf, size_t len
 	efa_rdm_msg_construct(&msg, &iov, &desc, 1, dest_addr, context, data);
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged,
 				    efa_rdm_tx_flags(efa_rdm_ep) | FI_REMOTE_CQ_DATA, 0);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -633,11 +604,9 @@ ssize_t efa_rdm_msg_tinject(struct fid_ep *ep_fid, const void *buf, size_t len,
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->inject_tagged_size);
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 			return fi_tinject(efa_rdm_ep->shm_ep, buf, len, shm_addr, tag);
 		}
 	}
@@ -650,7 +619,6 @@ ssize_t efa_rdm_msg_tinject(struct fid_ep *ep_fid, const void *buf, size_t len,
 	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged,
 				    efa_rdm_tx_flags(efa_rdm_ep) | FI_INJECT,
 				    EFA_RDM_TXE_NO_COMPLETION);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 
@@ -667,11 +635,9 @@ ssize_t efa_rdm_msg_tinjectdata(struct fid_ep *ep_fid, const void *buf, size_t l
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->inject_tagged_size);
 
-	ofi_genlock_lock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	if (efa_rdm_ep->shm_ep) {
 		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
 		if (shm_addr != FI_ADDR_NOTAVAIL) {
-			ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 			return fi_tinjectdata(efa_rdm_ep->shm_ep, buf, len, data, shm_addr, tag);
 		}
 	}
@@ -685,7 +651,6 @@ ssize_t efa_rdm_msg_tinjectdata(struct fid_ep *ep_fid, const void *buf, size_t l
 				    efa_rdm_tx_flags(efa_rdm_ep) |
 				    FI_REMOTE_CQ_DATA | FI_INJECT,
 				    EFA_RDM_TXE_NO_COMPLETION);
-	ofi_genlock_unlock(&efa_rdm_ep_rdm_domain(efa_rdm_ep)->srx_lock);
 	return ret;
 }
 

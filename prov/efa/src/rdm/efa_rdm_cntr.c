@@ -21,18 +21,13 @@ static uint64_t efa_rdm_cntr_read(struct fid_cntr *cntr_fid)
 	domain = container_of(efa_rdm_cntr->efa_cntr.util_cntr.domain, struct efa_domain, util_domain);
 
 	/* Flush SHM completions into the peer counter before reading */
-	ofi_genlock_lock(&((struct efa_rdm_domain *) domain)->srx_lock);
-	if (efa_rdm_cntr->shm_cntr)
+	if (efa_rdm_cntr->shm_cntr) {
+		ofi_genlock_lock(&((struct efa_rdm_domain *) domain)->srx_lock);
 		fi_cntr_read(efa_rdm_cntr->shm_cntr);
+		ofi_genlock_unlock(&((struct efa_rdm_domain *) domain)->srx_lock);
+	}
 
-	/*
-	 * keep srx_lock for ofi_cntr_read because the registered
-	 * progress callback (efa_rdm_cntr_progress) drives ibv_cq polling,
-	 * and the CQ poll path calls efa_rdm_ep_get_peer_explicit which
-	 * asserts srx_lock is held.
-	 */
 	ret = ofi_cntr_read(cntr_fid);
-	ofi_genlock_unlock(&((struct efa_rdm_domain *) domain)->srx_lock);
 
 	return ret;
 }
@@ -46,18 +41,13 @@ static uint64_t efa_rdm_cntr_readerr(struct fid_cntr *cntr_fid)
 	efa_rdm_cntr = container_of(cntr_fid, struct efa_rdm_cntr, efa_cntr.util_cntr.cntr_fid);
 	domain = container_of(efa_rdm_cntr->efa_cntr.util_cntr.domain, struct efa_domain, util_domain);
 
-	ofi_genlock_lock(&((struct efa_rdm_domain *) domain)->srx_lock);
-	if (efa_rdm_cntr->shm_cntr)
+	if (efa_rdm_cntr->shm_cntr) {
+		ofi_genlock_lock(&((struct efa_rdm_domain *) domain)->srx_lock);
 		fi_cntr_read(efa_rdm_cntr->shm_cntr);
+		ofi_genlock_unlock(&((struct efa_rdm_domain *) domain)->srx_lock);
+	}
 
-	/*
-	 * keep srx_lock for ofi_cntr_readerr because the registered
-	 * progress callback (efa_rdm_cntr_progress) drives ibv_cq polling,
-	 * and the CQ poll path calls efa_rdm_ep_get_peer_explicit which
-	 * asserts srx_lock is held.
-	 */
 	ret = ofi_cntr_readerr(cntr_fid);
-	ofi_genlock_unlock(&((struct efa_rdm_domain *) domain)->srx_lock);
 
 	return ret;
 }

@@ -224,8 +224,6 @@ int efa_rdm_ep_flush_queued_blocking_copy_to_hmem(struct efa_rdm_ep *ep);
 
 struct efa_ep_addr *efa_rdm_ep_raw_addr(struct efa_rdm_ep *ep);
 
-struct efa_rdm_peer *efa_rdm_ep_get_peer(struct efa_rdm_ep *ep, fi_addr_t addr);
-
 struct efa_rdm_peer *efa_rdm_ep_get_peer_explicit(struct efa_rdm_ep *ep, fi_addr_t addr);
 
 int32_t efa_rdm_ep_get_peer_ahn(struct efa_rdm_ep *ep, fi_addr_t addr);
@@ -625,7 +623,6 @@ fi_addr_t efa_rdm_ep_get_explicit_shm_fi_addr(struct efa_rdm_ep *ep, fi_addr_t a
 {
 	struct efa_conn *conn;
 
-	assert(ofi_genlock_held(&efa_rdm_ep_rdm_domain(ep)->srx_lock));
 	conn = efa_av_addr_to_conn(ep->base_ep.av, addr);
 	return conn ? conn->shm_fi_addr : FI_ADDR_NOTAVAIL;
 }
