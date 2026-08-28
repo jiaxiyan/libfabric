@@ -96,7 +96,6 @@ OFI_TSA_LOCK_SYMBOL_DECLARE(efa_qp_table_lock_sym);
 OFI_TSA_LOCK_SYMBOL_DECLARE(efa_implicit_av_lock_sym);
 OFI_TSA_LOCK_SYMBOL_DECLARE(efa_util_ep_lock_sym);
 OFI_TSA_LOCK_SYMBOL_DECLARE(efa_ctrl_lock_sym);
-OFI_TSA_LOCK_SYMBOL_DECLARE(efa_util_av_lock_sym);
 OFI_TSA_LOCK_SYMBOL_DECLARE(efa_util_domain_lock_sym);
 
 #endif /* EFA_THREAD_ANNOTATIONS_H */

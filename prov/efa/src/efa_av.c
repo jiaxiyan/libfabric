@@ -59,7 +59,6 @@ struct efa_conn *efa_av_addr_to_conn_implicit(struct efa_av *av, fi_addr_t fi_ad
  * 		If no such peer exist, return FI_ADDR_NOTAVAIL
  */
 fi_addr_t efa_av_reverse_lookup(struct efa_av *av, uint16_t ahn, uint16_t qpn)
-	OFI_TSA_NO_ANALYSIS // DGRAM uses FI_THREAD_DOMAIN, efa direct doesn't acquire the lock
 {
 	struct efa_cur_reverse_av *cur_entry;
 	struct efa_cur_reverse_av_key cur_key;
@@ -144,15 +143,14 @@ fi_addr_t efa_av_reverse_lookup_rdm(struct efa_av *av, uint16_t ahn,
 				    uint16_t qpn, struct efa_rdm_pke *pkt_entry)
 {
 	struct efa_conn *conn;
-	fi_addr_t fi_addr;
 
-	EFA_GENLOCK_LOCK(&av->util_av.lock, efa_util_av_lock_sym);
 	conn = efa_av_reverse_lookup_rdm_conn(
 		&av->cur_reverse_av, &av->prv_reverse_av, ahn, qpn, pkt_entry);
-	fi_addr = (OFI_LIKELY(!!conn)) ? conn->fi_addr : FI_ADDR_NOTAVAIL;
-	EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
 
-	return fi_addr;
+	if (OFI_LIKELY(!!conn))
+		return conn->fi_addr;
+
+	return FI_ADDR_NOTAVAIL;
 }
 
 /**
@@ -337,7 +335,6 @@ static int efa_conn_implicit_to_explicit(struct efa_av *av,
 					 struct efa_ep_addr *raw_addr,
 					 fi_addr_t implicit_fi_addr,
 					 fi_addr_t *fi_addr)
-	OFI_TSA_REQUIRES(efa_util_av_lock_sym)
 	OFI_TSA_REQUIRES(efa_implicit_av_lock_sym)
 	OFI_TSA_REQUIRES(efa_util_domain_lock_sym)
 {
@@ -356,7 +353,7 @@ static int efa_conn_implicit_to_explicit(struct efa_av *av,
 		 " to explicit AV\n",
 		 implicit_fi_addr);
 
-	assert(EFA_GENLOCK_HELD(&av->util_av.lock, efa_util_av_lock_sym));
+	assert(ofi_genlock_held(&av->util_av.lock));
 	assert(EFA_GENLOCK_HELD(&av->util_av_implicit.lock, efa_implicit_av_lock_sym));
 
 	implicit_conn = efa_av_addr_to_conn_implicit(av, implicit_fi_addr);
@@ -529,7 +526,7 @@ int efa_av_insert_one_explicit(struct efa_av *av,
 		 "Inserting address GID[%s] QP[%u] QKEY[%u] to explicit AV\n",
 		 raw_gid_str, addr->qpn, addr->qkey);
 
-	EFA_GENLOCK_LOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_lock(&av->util_av.lock);
 
 	/* Check if this address already exists in the explicit AV */
 	efa_fiaddr = ofi_av_lookup_fi_addr_unsafe(&av->util_av, addr);
@@ -539,7 +536,7 @@ int efa_av_insert_one_explicit(struct efa_av *av,
 			 "address! fi_addr: %" PRId64 "\n",
 			 efa_fiaddr);
 		*fi_addr = efa_fiaddr;
-		EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+		ofi_genlock_unlock(&av->util_av.lock);
 		return 0;
 	}
 
@@ -558,7 +555,7 @@ int efa_av_insert_one_explicit(struct efa_av *av,
 			*fi_addr = FI_ADDR_NOTAVAIL;
 
 		EFA_GENLOCK_UNLOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
-		EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+		ofi_genlock_unlock(&av->util_av.lock);
 		return ret;
 	}
 	EFA_GENLOCK_UNLOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
@@ -567,12 +564,12 @@ int efa_av_insert_one_explicit(struct efa_av *av,
 	conn = efa_conn_alloc_explicit(av, addr, flags, context, insert_shm_av);
 	if (!conn) {
 		*fi_addr = FI_ADDR_NOTAVAIL;
-		EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+		ofi_genlock_unlock(&av->util_av.lock);
 		return -FI_EADDRNOTAVAIL;
 	}
 
 	*fi_addr = conn->fi_addr;
-	EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_unlock(&av->util_av.lock);
 
 	EFA_INFO(FI_LOG_AV,
 		 "Successfully inserted address GID[%s] QP[%u] "
@@ -618,18 +615,18 @@ int efa_av_insert_one_implicit(struct efa_av *av,
 		 raw_gid_str, addr->qpn, addr->qkey);
 
 	/* Check if this address already exists in the explicit AV */
-	EFA_GENLOCK_LOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_lock(&av->util_av.lock);
 	efa_fiaddr = ofi_av_lookup_fi_addr_unsafe(&av->util_av, addr);
 	if (efa_fiaddr != FI_ADDR_NOTAVAIL) {
 		*fi_addr = efa_fiaddr;
-		EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+		ofi_genlock_unlock(&av->util_av.lock);
 		EFA_INFO(FI_LOG_AV,
 			 "Found existing AV entry pointing to this "
 			 "address! fi_addr: %" PRId64 "\n",
 			 efa_fiaddr);
 		return 0;
 	}
-	EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_unlock(&av->util_av.lock);
 
 	/* Check if address already exists in the implicit AV */
 	EFA_GENLOCK_LOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
@@ -738,15 +735,15 @@ static int efa_av_lookup(struct fid_av *av_fid, fi_addr_t fi_addr,
 	if (fi_addr == FI_ADDR_NOTAVAIL)
 		return -FI_EINVAL;
 
-	EFA_GENLOCK_LOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_lock(&av->util_av.lock);
 	conn = efa_av_addr_to_conn(av, fi_addr);
 	if (!conn) {
-		EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+		ofi_genlock_unlock(&av->util_av.lock);
 		return -FI_EINVAL;
 	}
 
 	memcpy(addr, (void *)conn->ep_addr, MIN(EFA_EP_ADDR_LEN, *addrlen));
-	EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_unlock(&av->util_av.lock);
 	if (*addrlen > EFA_EP_ADDR_LEN)
 		*addrlen = EFA_EP_ADDR_LEN;
 	return 0;
@@ -796,7 +793,7 @@ static int efa_av_remove(struct fid_av *av_fid, fi_addr_t *fi_addr,
 	 * util_domain.lock -> util_av.lock -> util_av_implicit.lock
 	 * in the AV insertion, removal and CQ read paths to prevent deadlocks */
 	EFA_GENLOCK_LOCK(&av->domain->util_domain.lock, efa_util_domain_lock_sym);
-	EFA_GENLOCK_LOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_lock(&av->util_av.lock);
 	for (i = 0; i < count; i++) {
 		conn = efa_av_addr_to_conn(av, fi_addr[i]);
 		if (!conn) {
@@ -812,7 +809,7 @@ static int efa_av_remove(struct fid_av *av_fid, fi_addr_t *fi_addr,
 		assert(err);
 	}
 
-	EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_unlock(&av->util_av.lock);
 	EFA_GENLOCK_UNLOCK(&av->domain->util_domain.lock, efa_util_domain_lock_sym);
 	return err;
 }
@@ -844,7 +841,7 @@ static void efa_av_close_reverse_av(struct efa_av *av)
 	 * in the AV insertion, removal and CQ read paths to prevent deadlocks */
 	EFA_GENLOCK_LOCK(&av->domain->util_domain.lock, efa_util_domain_lock_sym);
 
-	EFA_GENLOCK_LOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_lock(&av->util_av.lock);
 	HASH_ITER(hh, av->cur_reverse_av, cur_entry, curtmp) {
 		efa_conn_release_explicit(av, cur_entry->conn);
 	}
@@ -852,7 +849,7 @@ static void efa_av_close_reverse_av(struct efa_av *av)
 	HASH_ITER(hh, av->prv_reverse_av, prv_entry, prvtmp) {
 		efa_conn_release_explicit(av, prv_entry->conn);
 	}
-	EFA_GENLOCK_UNLOCK(&av->util_av.lock, efa_util_av_lock_sym);
+	ofi_genlock_unlock(&av->util_av.lock);
 
 	EFA_GENLOCK_LOCK(&av->util_av_implicit.lock, efa_implicit_av_lock_sym);
 	HASH_ITER(hh, av->cur_reverse_av_implicit, cur_entry, curtmp) {
