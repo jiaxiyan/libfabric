@@ -643,11 +643,6 @@ static int efa_rdm_cq_process_prov_errno(struct efa_ibv_cq *ibv_cq, struct efa_r
 	return vendor_err;
 }
 
-static int efa_rdm_cq_match_ep(struct dlist_entry *item, const void *ep)
-{
-	return (container_of(item, struct efa_rdm_ep, entry) == ep) ;
-}
-
 static inline struct efa_rdm_ep *efa_rdm_cq_get_rdm_ep(struct efa_ibv_cq *cq, struct efa_domain *efa_domain)
 {
 	struct efa_base_ep *base_ep = efa_ibv_cq_get_base_ep_from_cur_cqe(cq, efa_domain);
@@ -877,7 +872,7 @@ void efa_rdm_cq_poll_ibv_cq_closing_ep(struct efa_ibv_cq *ibv_cq, struct efa_rdm
 			status = efa_rdm_cq_process_wc(ibv_cq, ep);
 			if (status == IBV_WC_SUCCESS &&
 			    ep->efa_rx_pkts_to_post > 0 &&
-			    !dlist_find_first_match(&rx_progressed_ep_list, &efa_rdm_cq_match_ep, ep))
+			    dlist_empty(&ep->entry))
 				dlist_insert_tail(&ep->entry, &rx_progressed_ep_list);
 		}
 		ofi_genlock_unlock(&ep->srx_lock);
@@ -890,7 +885,7 @@ void efa_rdm_cq_poll_ibv_cq_closing_ep(struct efa_ibv_cq *ibv_cq, struct efa_rdm
 		&rx_progressed_ep_list, struct efa_rdm_ep, ep, entry, tmp) {
 		ofi_genlock_lock(&ep->srx_lock);
 		efa_rdm_ep_post_internal_rx_pkts(ep);
-		dlist_remove(&ep->entry);
+		dlist_remove_init(&ep->entry);
 		ofi_genlock_unlock(&ep->srx_lock);
 	}
 	assert(dlist_empty(&rx_progressed_ep_list));
@@ -927,7 +922,7 @@ int efa_rdm_cq_poll_ibv_cq(ssize_t cqe_to_process, struct efa_ibv_cq *ibv_cq)
 			ofi_genlock_unlock(&ep->srx_lock);
 			break;
 		}
-		if (ep->efa_rx_pkts_to_post > 0 && !dlist_find_first_match(&rx_progressed_ep_list, &efa_rdm_cq_match_ep, ep))
+		if (ep->efa_rx_pkts_to_post > 0 && dlist_empty(&ep->entry))
 			dlist_insert_tail(&ep->entry, &rx_progressed_ep_list);
 		ofi_genlock_unlock(&ep->srx_lock);
 		if (++i >= cqe_to_process)
@@ -946,7 +941,7 @@ int efa_rdm_cq_poll_ibv_cq(ssize_t cqe_to_process, struct efa_ibv_cq *ibv_cq)
 		&rx_progressed_ep_list, struct efa_rdm_ep, ep, entry, tmp) {
 		ofi_genlock_lock(&ep->srx_lock);
 		efa_rdm_ep_post_internal_rx_pkts(ep);
-		dlist_remove(&ep->entry);
+		dlist_remove_init(&ep->entry);
 		ofi_genlock_unlock(&ep->srx_lock);
 	}
 	assert(dlist_empty(&rx_progressed_ep_list));

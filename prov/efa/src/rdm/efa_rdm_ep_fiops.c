@@ -412,6 +412,7 @@ void efa_rdm_ep_init_linked_lists(struct efa_rdm_ep *ep)
 	dlist_init(&ep->peer_backoff_list);
 	dlist_init(&ep->handshake_queued_peer_list);
 	dlist_init(&ep->progress_ep_entry);
+	dlist_init(&ep->entry);
 	ep->needs_progress = false;
 #if ENABLE_DEBUG
 	dlist_init(&ep->ope_recv_list);
