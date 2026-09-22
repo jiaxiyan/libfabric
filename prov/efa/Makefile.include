@@ -370,7 +370,9 @@ nodist_prov_efa_test_gtest_efa_gtest_SOURCES = \
 	prov/efa/test/gtest/efa_gtest_tclass.cc \
 	prov/efa/test/gtest/efa_gtest_domain_utils.c \
 	prov/efa/test/gtest/efa_gtest_domain.cc \
-	prov/efa/test/gtest/efa_gtest_comp_action.cc
+	prov/efa/test/gtest/efa_gtest_comp_action.cc \
+	prov/efa/test/gtest/efa_gtest_xpu_utils.c \
+	prov/efa/test/gtest/efa_gtest_xpu.cc
 
 prov_efa_test_gtest_efa_gtest_CPPFLAGS = \
 	$(AM_CPPFLAGS) \
@@ -432,6 +434,7 @@ prov_efa_test_gtest_efa_gtest_LDFLAGS = \
 	-Wl,--wrap=ofi_copy_from_hmem_iov \
 	-Wl,--wrap=ofi_dev_reg_copy_from_hmem_iov \
 	-Wl,--wrap=ofi_copy_to_hmem_iov \
+	-Wl,--wrap=efadv_query_cq \
 	-Wl,--wrap=malloc
 
 if HAVE_EFADV_QUERY_QP_WQS

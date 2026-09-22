@@ -11,6 +11,7 @@
 #include <cuda.h>
 #endif
 
+
 #include <bitset>
 #include <gmock/gmock.h>
 #include <vector>
@@ -37,9 +38,27 @@ struct efa_rdm_ope;
 struct dlist_entry;
 
 /*
+ * The XPU queue geometry queries only exist in a recent enough rdma-core, which
+ * is exactly what HAVE_EFA_XPU tests, so wrapping them is conditional too.
+ *
+ * efadv_query_qp_wqs is not listed here: it is mocked by
+ * EFA_MOCK_FUNCTIONS_QUERY_QP_WQS below, under its own HAVE_EFADV_QUERY_QP_WQS
+ * guard, and a symbol may only be mocked once.
+ */
+#if HAVE_EFA_XPU
+#define EFA_MOCK_XPU_FUNCTIONS(X)                                              \
+	X(int, efadv_query_cq,                                                 \
+	  (struct ibv_cq * ibvcq, struct efadv_cq_attr * attr,                 \
+	   uint32_t inlen),                                                    \
+	  (ibvcq, attr, inlen))
+#else
+#define EFA_MOCK_XPU_FUNCTIONS(X)
+#endif
+
+/*
  * X-macro list of every mocked function. Each row is
  *   X(ret, name, (param decls), (arg names))
- * 
+ *
  * To add a new mocked function:
  *   1. Add a row to EFA_MOCK_FUNCTIONS
  *   2. Add any needed forward struct declarations above
@@ -202,7 +221,8 @@ struct dlist_entry;
 	  (hmem_iface, device, hmem_iov, hmem_iov_count, hmem_iov_offset, src, \
 	   size))                                                              \
 	EFA_MOCK_FUNCTIONS_QUERY_QP_WQS(X)                                    \
-	EFA_MOCK_FUNCTIONS_CUDA_CTX_SYNC_MEMOPS(X)
+	EFA_MOCK_FUNCTIONS_CUDA_CTX_SYNC_MEMOPS(X)                            \
+	EFA_MOCK_XPU_FUNCTIONS(X)
 
 /* --- Generator macros --- */
 
