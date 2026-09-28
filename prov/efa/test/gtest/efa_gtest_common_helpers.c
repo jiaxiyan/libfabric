@@ -6,6 +6,7 @@
 #include "efa_cq.h"
 #include "efa_mr.h"
 #include "efa_device.h"
+#include "efa_wr.h"
 #include "rdm/efa_rdm_ep.h"
 #include "rdm/efa_rdm_mr.h"
 #include "rdm/efa_rdm_rma.h"
@@ -251,6 +252,25 @@ int efa_test_rdm_rma_verified_copy_iov(struct fid_ep *ep_fid, uint64_t addr,
 	struct efa_rma_iov rma = {.addr = addr, .len = len, .key = key};
 
 	return efa_rdm_rma_verified_copy_iov(ep, &rma, 1, flags, iov, desc);
+}
+
+size_t efa_test_wr_tx_size(void)
+{
+	return efa_wr_tx_size();
+}
+
+size_t efa_test_wr_rx_size(void)
+{
+	return efa_wr_rx_size(g_efa_selected_device_list[0].efa_attr.max_rq_sge);
+}
+
+int efa_test_have_data_path_direct(void)
+{
+#if HAVE_EFA_DATA_PATH_DIRECT
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 int efa_test_device_probe(void)
