@@ -145,6 +145,22 @@ int efa_test_util_domain_trylock(struct fid_domain *domain);
 void efa_test_util_domain_unlock(struct fid_domain *domain);
 
 /**
+ * @brief The transmit/receive work request sizes efa-direct reports in
+ * fi_ep_attr::max_tx_wr_size / max_rx_wr_size, i.e. efa_wr_tx_size() and
+ * efa_wr_rx_size(device max_rq_sge). Both are 0 on builds without the direct
+ * data path.
+ */
+size_t efa_test_wr_tx_size(void);
+size_t efa_test_wr_rx_size(void);
+
+/**
+ * @brief Whether this build was compiled with the direct data path
+ * (HAVE_EFA_DATA_PATH_DIRECT), i.e. efa-direct reports non-zero work request
+ * sizes and advertises FI_WR.
+ */
+int efa_test_have_data_path_direct(void);
+
+/**
  * @brief Initialize the provider so the device queries below are valid, by
  * running a fi_getinfo. Returns 0 on success, a negative fi errno otherwise.
  */

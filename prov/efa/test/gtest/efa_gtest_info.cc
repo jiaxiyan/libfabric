@@ -112,3 +112,56 @@ TEST_F(EfaInfoQueueDepthTest, getinfo_rejects_tx_size_above_wide_wqe_depth)
 	EXPECT_EQ(getinfo(), -FI_ENODATA);
 	EXPECT_EQ(info, nullptr);
 }
+
+class EfaInfoWrTest : public Test
+{
+	protected:
+	struct fi_info *hints = nullptr;
+	struct fi_info *info = nullptr;
+
+	void SetUp() override
+	{
+		ASSERT_EQ(efa_test_device_probe(), 0);
+	}
+
+	void TearDown() override
+	{
+		if (info)
+			fi_freeinfo(info);
+		if (hints)
+			fi_freeinfo(hints);
+	}
+
+	int getinfo(const char *fabric_name)
+	{
+		hints = efa_test_alloc_default_hints(FI_EP_RDM, fabric_name);
+		if (!hints)
+			return -FI_ENOMEM;
+		return fi_getinfo(FI_VERSION(2, 0), NULL, NULL, 0ULL, hints,
+				  &info);
+	}
+};
+
+TEST_F(EfaInfoWrTest, direct_reports_wr_sizes_and_caps)
+{
+	ASSERT_EQ(getinfo(EFA_DIRECT_FABRIC_NAME), 0);
+	ASSERT_NE(info, nullptr);
+
+	EXPECT_EQ(info->ep_attr->max_tx_wr_size, efa_test_wr_tx_size());
+	EXPECT_EQ(info->ep_attr->max_rx_wr_size, efa_test_wr_rx_size());
+
+	if (efa_test_have_data_path_direct())
+		EXPECT_TRUE(info->caps & FI_WR);
+	else
+		EXPECT_FALSE(info->caps & FI_WR);
+}
+
+TEST_F(EfaInfoWrTest, rdm_reports_no_wr_sizes_or_caps)
+{
+	ASSERT_EQ(getinfo(EFA_FABRIC_NAME), 0);
+	ASSERT_NE(info, nullptr);
+
+	EXPECT_EQ(info->ep_attr->max_tx_wr_size, 0);
+	EXPECT_EQ(info->ep_attr->max_rx_wr_size, 0);
+	EXPECT_FALSE(info->caps & FI_WR);
+}
