@@ -113,6 +113,30 @@ uint32_t efa_test_get_qp_num(struct fid_ep *ep)
 	return base_ep->qp->qp_num;
 }
 
+size_t efa_test_ep_recv_wr_index(struct fid_ep *ep)
+{
+	struct efa_base_ep *base_ep;
+
+	base_ep = container_of(ep, struct efa_base_ep, util_ep.ep_fid);
+	return base_ep->recv_wr_index;
+}
+
+int efa_test_ep_is_wr_started(struct fid_ep *ep)
+{
+	struct efa_base_ep *base_ep;
+
+	base_ep = container_of(ep, struct efa_base_ep, util_ep.ep_fid);
+	return base_ep->is_wr_started;
+}
+
+uint32_t efa_test_ep_sq_num_wqe_pending(struct fid_ep *ep)
+{
+	struct efa_base_ep *base_ep;
+
+	base_ep = container_of(ep, struct efa_base_ep, util_ep.ep_fid);
+	return base_ep->qp->data_path_direct_qp.sq.num_wqe_pending;
+}
+
 void efa_test_set_ibv_cq_ex(struct efa_ibv_cq *ibv_cq, int status,
 			    uint64_t wr_id)
 {

@@ -145,6 +145,27 @@ int efa_test_util_domain_trylock(struct fid_domain *domain);
 void efa_test_util_domain_unlock(struct fid_domain *domain);
 
 /**
+ * @brief The endpoint's staged receive work request count
+ * (efa_base_ep::recv_wr_index), i.e. how many FI_MORE recvs are queued but not
+ * yet posted.
+ */
+size_t efa_test_ep_recv_wr_index(struct fid_ep *ep);
+
+/**
+ * @brief The endpoint's send queue count of WQEs staged but not yet rung to the
+ * device (efa_data_path_direct_sq::num_wqe_pending). Only meaningful when the
+ * direct data path is enabled.
+ */
+uint32_t efa_test_ep_sq_num_wqe_pending(struct fid_ep *ep);
+
+/**
+ * @brief Whether the endpoint has an open ibv_wr batch that fi_tx_flush must
+ * complete (efa_base_ep::is_wr_started). Used on the non-direct path where
+ * fi_tx_flush calls ibv_wr_complete and clears this flag.
+ */
+int efa_test_ep_is_wr_started(struct fid_ep *ep);
+
+/**
  * @brief Initialize the provider so the device queries below are valid, by
  * running a fi_getinfo. Returns 0 on success, a negative fi errno otherwise.
  */
