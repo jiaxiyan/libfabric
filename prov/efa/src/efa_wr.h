@@ -6,6 +6,8 @@
 
 #include <stddef.h>
 
+#include <rdma/fabric.h>
+
 /*
  * Work Request (WR) API support for efa-direct.  See fi_wr(3).
  *
@@ -37,5 +39,20 @@ size_t efa_wr_tx_size(void);
  * @return 0 when work requests are not supported by this build
  */
 size_t efa_wr_rx_size(size_t num_sge);
+
+/*
+ * Flush calls.  These initiate work the provider deferred because the
+ * operation was posted with FI_MORE, or because it was queued with
+ * fi_wr_queue_tx or fi_wr_queue_recv, and are available whether or not the
+ * endpoint reports FI_WR.  efa-direct has no tagged receive queue, so it does
+ * not implement fi_trecv_flush.
+ *
+ * A receive queued with fi_wr_queue_recv is invisible to the device until
+ * fi_recv_flush, so a send arriving in between finds no buffer.  Unlike
+ * FI_MORE, which the next ordinary post resolves, this deferral lasts until
+ * the application flushes.
+ */
+ssize_t efa_wr_tx_flush(struct fid_ep *ep_fid, uint64_t flags);
+ssize_t efa_wr_rx_flush(struct fid_ep *ep_fid, uint64_t flags);
 
 #endif /* EFA_WR_H */

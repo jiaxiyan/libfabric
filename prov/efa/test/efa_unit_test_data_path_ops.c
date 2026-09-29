@@ -45,7 +45,6 @@ int efa_qp_post_write(struct efa_qp *qp, const struct ibv_sge *sge_list, size_t 
 }
 
 
-
 /* CQ wrapper functions - unit test stubs */
 int efa_ibv_cq_start_poll(struct efa_ibv_cq *ibv_cq, struct ibv_poll_cq_attr *attr)
 {
