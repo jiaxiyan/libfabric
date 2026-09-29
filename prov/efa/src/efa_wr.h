@@ -7,6 +7,7 @@
 #include <stddef.h>
 
 #include <rdma/fabric.h>
+#include <rdma/fi_wr.h>
 
 /*
  * Work Request (WR) API support for efa-direct.  See fi_wr(3).
@@ -54,5 +55,7 @@ size_t efa_wr_rx_size(size_t num_sge);
  */
 ssize_t efa_wr_tx_flush(struct fid_ep *ep_fid, uint64_t flags);
 ssize_t efa_wr_rx_flush(struct fid_ep *ep_fid, uint64_t flags);
+
+extern struct fi_ops_wr efa_wr_ops;
 
 #endif /* EFA_WR_H */
