@@ -33,4 +33,12 @@ extern struct fi_ops_wr efa_wr_ops;
  */
 size_t efa_wr_tx_size(void);
 
+/**
+ * @brief Size of a receive work request, for fi_ep_attr::max_rx_wr_size
+ *
+ * @param num_sge	number of receive SGEs to make room for
+ * @return 0 when work requests are not supported by this build
+ */
+size_t efa_wr_rx_size(size_t num_sge);
+
 #endif /* EFA_WR_H */
