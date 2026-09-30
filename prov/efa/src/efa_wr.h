@@ -26,4 +26,11 @@ int efa_wr_rx_flush(struct fid_ep *ep_fid, uint64_t flags);
 
 extern struct fi_ops_wr efa_wr_ops;
 
+/**
+ * @brief Size of a transmit work request, for fi_ep_attr::max_tx_wr_size
+ *
+ * @return 0 when work requests are not supported by this build
+ */
+size_t efa_wr_tx_size(void);
+
 #endif /* EFA_WR_H */
