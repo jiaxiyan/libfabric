@@ -50,6 +50,7 @@
 #include <rdma/fi_tagged.h>
 #include <rdma/fi_atomic.h>
 #include <rdma/fi_collective.h>
+#include <rdma/fi_wr.h>
 
 #include "shared.h"
 #include "hmem.h"
@@ -1108,6 +1109,11 @@ int ft_getinfo(struct fi_info *hints, struct fi_info **info)
 	if (opts.options & FT_OPT_NO_CONTEXT2)
 		hints->mode &= ~FI_CONTEXT2;
 
+	if (opts.use_wr_api) {
+		hints->caps |= FI_WR;
+		hints->mode &= ~FI_CONTEXT2;
+	}
+
 	hints->domain_attr->threading = opts.threading;
 
 	ret = fi_getinfo(ft_fiversion, node, service, flags, hints, info);
@@ -1925,6 +1931,9 @@ static int ft_cleanup_mr_array(struct ft_context *ctx_arr, char **mr_bufs)
 	return first_err;
 }
 
+/* Defined with the rest of the work request posting path. */
+static void ft_free_wrs(void);
+
 int ft_close_fids(void)
 {
 	int ret, first_err = 0;
@@ -2021,6 +2030,7 @@ int ft_free_res(void)
 	ret = ft_close_fids();
 	if (ret && !first_err)
 		first_err = ret;
+	ft_free_wrs();
 	free(user_test_sizes);
 	if (buf) {
 		ret = ft_hmem_free(opts.iface, buf);
@@ -2280,6 +2290,341 @@ int ft_progress(struct fid_cq *cq, uint64_t total, uint64_t *cq_cntr)
 	return ret;
 }
 
+/*
+ * Work request API posting.
+ *
+ * With --use-wr, ft_post_tx_buf() and ft_post_rx_buf() format the operation with
+ * fi_wr_prepare and then submit it with fi_wr_queue_tx / fi_wr_queue_recv /
+ * fi_wr_queue_trecv plus the matching flush, instead of calling fi_send /
+ * fi_recv / fi_tsend / fi_trecv.  Every test built on those two helpers
+ * therefore also covers the work request interface, including the ping-pong and
+ * bandwidth benchmarks, tagged or not.
+ *
+ * A work request is opaque and provider sized, so its buffer comes from
+ * fi_ep_attr rather than from sizeof(), and a provider without the interface
+ * reports zero.
+ *
+ * Formatting is cached on the operation's arguments, so a loop that posts the
+ * same buffer, length and peer repeatedly prepares once and only queues after
+ * that.  That is what the split exists for, and it also means the same work
+ * request is queued many times, which a provider that wrote queue slot state
+ * back into it would get wrong.
+ *
+ * A cache miss currently reformats the whole operation.  Once the fi_wr_modify_*
+ * calls are implemented, a miss in a single field should become the matching
+ * modify call instead, which is both what an application would do and the only
+ * way those calls get covered.  A tagged post misses on every iteration today,
+ * because ft_tag defaults to 0 and the tag then follows tx_seq / rx_seq.
+ */
+static fi_wr ft_tx_wr, ft_rx_wr;
+static size_t ft_tx_wr_size, ft_rx_wr_size;
+
+/*
+ * A tagged send is queued and flushed as any other transmit, but a tagged
+ * receive has its own queue call and its own flush.
+ */
+enum ft_wr_queue_type {
+	FT_WR_QUEUE_TX,
+	FT_WR_QUEUE_RECV,
+	FT_WR_QUEUE_TRECV,
+};
+
+struct ft_wr_key {
+	bool valid;
+	void *buf;
+	void *desc;
+	size_t len;
+	fi_addr_t addr;
+	uint64_t data;
+	uint64_t tag;
+	uint64_t flags;
+	enum fi_op_type op_type;
+};
+
+static struct ft_wr_key ft_tx_wr_key, ft_rx_wr_key;
+
+static void ft_free_wrs(void)
+{
+	free(ft_tx_wr);
+	free(ft_rx_wr);
+	ft_tx_wr = NULL;
+	ft_rx_wr = NULL;
+	ft_tx_wr_size = 0;
+	ft_rx_wr_size = 0;
+	ft_tx_wr_key.valid = false;
+	ft_rx_wr_key.valid = false;
+}
+
+static int ft_alloc_wrs(void)
+{
+	if (ft_tx_wr && ft_rx_wr)
+		return 0;
+
+	ft_tx_wr_size = fi->ep_attr->max_tx_wr_size;
+	ft_rx_wr_size = fi->ep_attr->max_rx_wr_size;
+
+	if (!ft_tx_wr_size || !ft_rx_wr_size) {
+		FT_ERR("--use-wr given but %s reports no work request support "
+		       "(max_tx_wr_size %zu, max_rx_wr_size %zu)",
+		       fi->fabric_attr->prov_name, ft_tx_wr_size,
+		       ft_rx_wr_size);
+		return -FI_ENOSYS;
+	}
+
+	ft_tx_wr = calloc(1, ft_tx_wr_size);
+	ft_rx_wr = calloc(1, ft_rx_wr_size);
+	if (!ft_tx_wr || !ft_rx_wr) {
+		ft_free_wrs();
+		return -FI_ENOMEM;
+	}
+
+	return 0;
+}
+
+static bool ft_wr_key_matches(const struct ft_wr_key *key,
+			      enum fi_op_type op_type, void *op_buf,
+			      void *op_mr_desc, size_t len, fi_addr_t addr,
+			      uint64_t data, uint64_t tag, uint64_t flags)
+{
+	return key->valid && key->op_type == op_type && key->buf == op_buf &&
+	       key->desc == op_mr_desc && key->len == len &&
+	       key->addr == addr && key->data == data && key->tag == tag &&
+	       key->flags == flags;
+}
+
+/*
+ * Format one single iov operation.  The work request attributes reuse the
+ * deferred work queue descriptors, so an untagged operation is described by
+ * struct fi_op_msg and a tagged one by struct fi_op_tagged.
+ */
+static int ft_wr_prepare_op(struct fid_ep *ep_ptr, enum fi_op_type op_type,
+			    struct ft_wr_key *key, fi_wr wr, size_t wr_size,
+			    void *op_buf, void *op_mr_desc, size_t len,
+			    fi_addr_t addr, uint64_t data, uint64_t tag,
+			    uint64_t flags)
+{
+	struct iovec iov = {
+		.iov_base = op_buf,
+		.iov_len = len,
+	};
+	struct fi_msg msg = {
+		.msg_iov = &iov,
+		.desc = &op_mr_desc,
+		.iov_count = 1,
+		.addr = addr,
+		.context = NULL,
+		.data = (data == NO_CQ_DATA) ? 0 : data,
+	};
+	struct fi_msg_tagged tagged_msg = {
+		.msg_iov = &iov,
+		.desc = &op_mr_desc,
+		.iov_count = 1,
+		.addr = addr,
+		.tag = tag,
+		.ignore = 0,
+		.context = NULL,
+		.data = (data == NO_CQ_DATA) ? 0 : data,
+	};
+	struct fi_op_msg op_msg = {
+		.ep = ep_ptr,
+		.msg = msg,
+		.flags = flags,
+	};
+	struct fi_op_tagged op_tagged = {
+		.ep = ep_ptr,
+		.msg = tagged_msg,
+		.flags = flags,
+	};
+	struct fi_wr_attr attr = {
+		.op_type = op_type,
+	};
+	size_t wr_len = wr_size;
+	int ret;
+
+	if (op_type == FI_OP_TSEND || op_type == FI_OP_TRECV)
+		attr.op.tagged = &op_tagged;
+	else
+		attr.op.msg = &op_msg;
+
+	ret = fi_wr_prepare(ep_ptr, &attr, wr, &wr_len);
+	if (ret) {
+		FT_PRINTERR("fi_wr_prepare", ret);
+		return ret;
+	}
+
+	if (wr_len > wr_size) {
+		FT_ERR("fi_wr_prepare reported length %zu over the %zu byte "
+		       "work request buffer", wr_len, wr_size);
+		return -FI_EOTHER;
+	}
+
+	*key = (struct ft_wr_key) {
+		.valid = true,
+		.buf = op_buf,
+		.desc = op_mr_desc,
+		.len = len,
+		.addr = addr,
+		.data = data,
+		.tag = tag,
+		.flags = flags,
+		.op_type = op_type,
+	};
+
+	return 0;
+}
+
+/*
+ * Queue a prepared work request and flush it, retrying on a full queue the way
+ * FT_POST() does.  The flush before progressing matters: a queued operation is
+ * not visible to the device until it is flushed, so completions that would free
+ * queue space may be waiting on it.
+ */
+static ssize_t ft_wr_queue(struct fid_ep *ep_ptr, const fi_wr wr, void *ctx,
+			   enum ft_wr_queue_type type)
+{
+	switch (type) {
+	case FT_WR_QUEUE_TX:
+		return fi_wr_queue_tx(ep_ptr, wr, ctx);
+	case FT_WR_QUEUE_RECV:
+		return fi_wr_queue_recv(ep_ptr, wr, ctx);
+	default:
+		return fi_wr_queue_trecv(ep_ptr, wr, ctx);
+	}
+}
+
+static ssize_t ft_wr_flush(struct fid_ep *ep_ptr, enum ft_wr_queue_type type)
+{
+	switch (type) {
+	case FT_WR_QUEUE_TX:
+		return fi_tx_flush(ep_ptr, 0);
+	case FT_WR_QUEUE_RECV:
+		return fi_recv_flush(ep_ptr, 0);
+	default:
+		return fi_trecv_flush(ep_ptr, 0);
+	}
+}
+
+static ssize_t ft_wr_queue_and_flush(struct fid_ep *ep_ptr, const fi_wr wr,
+				     void *ctx, enum ft_wr_queue_type type)
+{
+	bool tx = (type == FT_WR_QUEUE_TX);
+	struct fid_cq *cq = tx ? txcq : rxcq;
+	uint64_t *seq = tx ? &tx_seq : &rx_seq;
+	uint64_t *cq_cntr = tx ? &tx_cq_cntr : &rx_cq_cntr;
+	const char *queue_str =
+		(type == FT_WR_QUEUE_TX) ? "fi_wr_queue_tx" :
+		(type == FT_WR_QUEUE_RECV) ? "fi_wr_queue_recv" :
+					     "fi_wr_queue_trecv";
+	const char *flush_str =
+		(type == FT_WR_QUEUE_TX) ? "fi_tx_flush" :
+		(type == FT_WR_QUEUE_RECV) ? "fi_recv_flush" :
+					     "fi_trecv_flush";
+	int timeout_save, rc;
+	ssize_t ret;
+
+	while (1) {
+		ret = ft_wr_queue(ep_ptr, wr, ctx, type);
+		if (!ret)
+			break;
+
+		if (ret != -FI_EAGAIN) {
+			FT_PRINTERR(queue_str, ret);
+			return ret;
+		}
+
+		ret = ft_wr_flush(ep_ptr, type);
+		if (ret) {
+			FT_PRINTERR(flush_str, ret);
+			return ret;
+		}
+
+		timeout_save = timeout;
+		timeout = 0;
+		rc = ft_progress(cq, *seq, cq_cntr);
+		timeout = timeout_save;
+		if (rc && rc != -FI_EAGAIN) {
+			FT_ERR("Failed to get %s completion", queue_str);
+			return rc;
+		}
+	}
+
+	ret = ft_wr_flush(ep_ptr, type);
+	if (ret) {
+		FT_PRINTERR(flush_str, ret);
+		return ret;
+	}
+
+	(*seq)++;
+	return 0;
+}
+
+static ssize_t ft_wr_post_tx_buf(struct fid_ep *ep_ptr, fi_addr_t fi_addr,
+				 size_t size, uint64_t data, void *ctx,
+				 void *op_buf, void *op_mr_desc,
+				 uint64_t op_tag)
+{
+	uint64_t flags = (data == NO_CQ_DATA) ? 0 : FI_REMOTE_CQ_DATA;
+	enum fi_op_type op_type;
+	int ret;
+
+	ret = ft_alloc_wrs();
+	if (ret)
+		return ret;
+
+	if (hints->caps & FI_TAGGED) {
+		op_type = FI_OP_TSEND;
+		op_tag = op_tag ? op_tag : tx_seq;
+	} else {
+		op_type = FI_OP_SEND;
+		op_tag = 0;
+	}
+
+	if (!ft_wr_key_matches(&ft_tx_wr_key, op_type, op_buf, op_mr_desc, size,
+			       fi_addr, data, op_tag, flags)) {
+		ret = ft_wr_prepare_op(ep_ptr, op_type, &ft_tx_wr_key, ft_tx_wr,
+				       ft_tx_wr_size, op_buf, op_mr_desc, size,
+				       fi_addr, data, op_tag, flags);
+		if (ret)
+			return ret;
+	}
+
+	return ft_wr_queue_and_flush(ep_ptr, ft_tx_wr, ctx, FT_WR_QUEUE_TX);
+}
+
+static ssize_t ft_wr_post_rx_buf(struct fid_ep *ep_ptr, fi_addr_t fi_addr,
+				 size_t size, void *ctx, void *op_buf,
+				 void *op_mr_desc, uint64_t op_tag)
+{
+	enum ft_wr_queue_type type;
+	enum fi_op_type op_type;
+	int ret;
+
+	ret = ft_alloc_wrs();
+	if (ret)
+		return ret;
+
+	if (hints->caps & FI_TAGGED) {
+		op_type = FI_OP_TRECV;
+		type = FT_WR_QUEUE_TRECV;
+		op_tag = op_tag ? op_tag : rx_seq;
+	} else {
+		op_type = FI_OP_RECV;
+		type = FT_WR_QUEUE_RECV;
+		op_tag = 0;
+	}
+
+	if (!ft_wr_key_matches(&ft_rx_wr_key, op_type, op_buf, op_mr_desc, size,
+			       fi_addr, NO_CQ_DATA, op_tag, 0)) {
+		ret = ft_wr_prepare_op(ep_ptr, op_type, &ft_rx_wr_key, ft_rx_wr,
+				       ft_rx_wr_size, op_buf, op_mr_desc, size,
+				       fi_addr, NO_CQ_DATA, op_tag, 0);
+		if (ret)
+			return ret;
+	}
+
+	return ft_wr_queue_and_flush(ep_ptr, ft_rx_wr, ctx, type);
+}
+
 #define FT_POST(post_fn, progress_fn, cq, seq, cq_cntr, op_str, ...)		\
 	do {									\
 		int timeout_save;						\
@@ -2312,6 +2657,11 @@ ssize_t ft_post_tx_buf(struct fid_ep *ep, fi_addr_t fi_addr, size_t size,
 		       void *op_buf, void *op_mr_desc, uint64_t op_tag)
 {
 	size += ft_tx_prefix_size();
+
+	if (opts.use_wr_api)
+		return ft_wr_post_tx_buf(ep, fi_addr, size, data, ctx, op_buf,
+					 op_mr_desc, op_tag);
+
 	if (hints->caps & FI_TAGGED) {
 		op_tag = op_tag ? op_tag : tx_seq;
 		if (data != NO_CQ_DATA) {
@@ -2655,6 +3005,11 @@ ssize_t ft_post_rx_buf(struct fid_ep *ep, fi_addr_t fi_addr, size_t size, void *
 		       void *op_buf, void *op_mr_desc, uint64_t op_tag)
 {
 	size = MAX(size, FT_MAX_CTRL_MSG) + ft_rx_prefix_size();
+
+	if (opts.use_wr_api)
+		return ft_wr_post_rx_buf(ep, fi_addr, size, ctx, op_buf,
+					 op_mr_desc, op_tag);
+
 	if (hints->caps & FI_TAGGED) {
 		op_tag = op_tag ? op_tag : rx_seq;
 		FT_POST(fi_trecv, ft_progress, rxcq, rx_seq, &rx_cq_cntr,
@@ -4608,6 +4963,11 @@ void ft_longopts_usage()
 		"maximum untagged message size");
 	FT_PRINT_OPTS_USAGE("--use-fi-more",
 		"Run tests with FI_MORE");
+	FT_PRINT_OPTS_USAGE("--use-wr",
+		"Post messages with the work request API\n"
+		"(fi_wr_prepare, fi_wr_queue_tx/fi_wr_queue_recv/\n"
+		"fi_wr_queue_trecv and the matching flush) instead of\n"
+		"fi_send and fi_recv. Requires FI_WR.");
 	FT_PRINT_OPTS_USAGE("--threading",
 		"threading model: safe|completion|domain (default:domain)");
 	FT_PRINT_OPTS_USAGE("--no-rx-cq-data",
@@ -4641,6 +5001,7 @@ struct option long_opts[] = {
 	{"expect-error", required_argument, NULL, LONG_OPT_EXPECT_ERROR},
 	{"sync-comp", required_argument, NULL, LONG_OPT_SYNC_COMP},
 	{"use-cuda-pcie-mapping", no_argument, NULL, LONG_OPT_USE_CUDA_PCIE_MAPPING},
+	{"use-wr", no_argument, NULL, LONG_OPT_USE_WR},
 	{NULL, 0, NULL, 0},
 };
 
@@ -4750,6 +5111,9 @@ int ft_parse_long_opts(int op, char *optarg)
 		return 0;
 	case LONG_OPT_USE_CUDA_PCIE_MAPPING:
 		opts.options |= FT_OPT_CUDA_PCIE_MAPPING;
+		return 0;
+	case LONG_OPT_USE_WR:
+		opts.use_wr_api = 1;
 		return 0;
 	default:
 		return EXIT_FAILURE;

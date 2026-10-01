@@ -210,6 +210,7 @@ struct ft_opts {
 	char *av_name;
 	int sizes_enabled;
 	int use_fi_more;
+	int use_wr_api;
 	int options;
 	enum ft_comp_method comp_method;
 	int machr;
@@ -712,6 +713,7 @@ enum {
 	LONG_OPT_EXPECT_ERROR,
 	LONG_OPT_SYNC_COMP,
 	LONG_OPT_USE_CUDA_PCIE_MAPPING,
+	LONG_OPT_USE_WR,
 };
 
 extern int debug_assert;
