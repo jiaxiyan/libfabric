@@ -50,6 +50,7 @@
 #include <rdma/fi_tagged.h>
 #include <rdma/fi_atomic.h>
 #include <rdma/fi_collective.h>
+#include <rdma/fi_wr.h>
 
 #include "shared.h"
 #include "hmem.h"
@@ -1108,6 +1109,12 @@ int ft_getinfo(struct fi_info *hints, struct fi_info **info)
 	if (opts.options & FT_OPT_NO_CONTEXT2)
 		hints->mode &= ~FI_CONTEXT2;
 
+	if (opts.use_wr_api) {
+		hints->caps |= FI_WR;
+		if (FI_VERSION_LT(ft_fiversion, FI_VERSION(2, 7)))
+			ft_fiversion = FI_VERSION(2, 7);
+	}
+
 	hints->domain_attr->threading = opts.threading;
 
 	ret = fi_getinfo(ft_fiversion, node, service, flags, hints, info);
@@ -2021,6 +2028,7 @@ int ft_free_res(void)
 	ret = ft_close_fids();
 	if (ret && !first_err)
 		first_err = ret;
+	ft_free_wrs();
 	free(user_test_sizes);
 	if (buf) {
 		ret = ft_hmem_free(opts.iface, buf);
@@ -2280,38 +2288,17 @@ int ft_progress(struct fid_cq *cq, uint64_t total, uint64_t *cq_cntr)
 	return ret;
 }
 
-#define FT_POST(post_fn, progress_fn, cq, seq, cq_cntr, op_str, ...)		\
-	do {									\
-		int timeout_save;						\
-		int ret, rc;							\
-										\
-		while (1) {							\
-			ret = post_fn(__VA_ARGS__);				\
-			if (!ret)						\
-				break;						\
-										\
-			if (ret != -FI_EAGAIN) {				\
-				FT_PRINTERR(op_str, ret);			\
-				return ret;					\
-			}							\
-										\
-			timeout_save = timeout;					\
-			timeout = 0;						\
-			rc = progress_fn(cq, seq, cq_cntr);			\
-			if (rc && rc != -FI_EAGAIN) {				\
-				FT_ERR("Failed to get " op_str " completion");	\
-				return rc;					\
-			}							\
-			timeout = timeout_save;					\
-		}								\
-		seq++;								\
-	} while (0)
 
 ssize_t ft_post_tx_buf(struct fid_ep *ep, fi_addr_t fi_addr, size_t size,
 		       uint64_t data, void *ctx,
 		       void *op_buf, void *op_mr_desc, uint64_t op_tag)
 {
 	size += ft_tx_prefix_size();
+
+	if (opts.use_wr_api)
+		return ft_wr_post_tx_buf(ep, fi_addr, size, data, ctx, op_buf,
+					 op_mr_desc, op_tag);
+
 	if (hints->caps & FI_TAGGED) {
 		op_tag = op_tag ? op_tag : tx_seq;
 		if (data != NO_CQ_DATA) {
@@ -2472,6 +2459,32 @@ static size_t ft_remote_read_offset(const char *buf)
 ssize_t ft_post_rma(enum ft_rma_opcodes op, char *buf, size_t size,
 		struct fi_rma_iov *remote, void *context)
 {
+	if (opts.use_wr_api) {
+		uint64_t rma_addr, data;
+
+		switch (op) {
+		case FT_RMA_WRITE:
+			rma_addr = remote->addr + ft_remote_write_offset(buf);
+			data = NO_CQ_DATA;
+			break;
+		case FT_RMA_WRITEDATA:
+			rma_addr = remote->addr + ft_remote_write_offset(buf);
+			data = remote_cq_data;
+			break;
+		case FT_RMA_READ:
+			rma_addr = remote->addr + ft_remote_read_offset(buf);
+			data = NO_CQ_DATA;
+			break;
+		default:
+			FT_ERR("Unknown RMA op type\n");
+			return EXIT_FAILURE;
+		}
+
+		return ft_wr_post_rma(op, ep, buf, mr_desc, size,
+				      remote_fi_addr, rma_addr, remote->key,
+				      data, context);
+	}
+
 	switch (op) {
 	case FT_RMA_WRITE:
 		FT_POST(fi_write, ft_progress, txcq, tx_seq, &tx_cq_cntr,
@@ -2655,6 +2668,11 @@ ssize_t ft_post_rx_buf(struct fid_ep *ep, fi_addr_t fi_addr, size_t size, void *
 		       void *op_buf, void *op_mr_desc, uint64_t op_tag)
 {
 	size = MAX(size, FT_MAX_CTRL_MSG) + ft_rx_prefix_size();
+
+	if (opts.use_wr_api)
+		return ft_wr_post_rx_buf(ep, fi_addr, size, ctx, op_buf,
+					 op_mr_desc, op_tag);
+
 	if (hints->caps & FI_TAGGED) {
 		op_tag = op_tag ? op_tag : rx_seq;
 		FT_POST(fi_trecv, ft_progress, rxcq, rx_seq, &rx_cq_cntr,
@@ -4610,6 +4628,8 @@ void ft_longopts_usage()
 		"Run tests with FI_MORE");
 	FT_PRINT_OPTS_USAGE("--use-fi-flush",
 		"Run FI_MORE tests with fi_tx_flush/fi_recv_flush/fi_trecv_flush");
+	FT_PRINT_OPTS_USAGE("--use-wr",
+		"Post messages with the work request API\n");
 	FT_PRINT_OPTS_USAGE("--threading",
 		"threading model: safe|completion|domain (default:domain)");
 	FT_PRINT_OPTS_USAGE("--no-rx-cq-data",
@@ -4647,6 +4667,7 @@ struct option long_opts[] = {
 	{"sync-comp", required_argument, NULL, LONG_OPT_SYNC_COMP},
 	{"use-cuda-pcie-mapping", no_argument, NULL, LONG_OPT_USE_CUDA_PCIE_MAPPING},
 	{"fi-version", required_argument, NULL, LONG_OPT_FI_VERSION},
+	{"use-wr", no_argument, NULL, LONG_OPT_USE_WR},
 	{NULL, 0, NULL, 0},
 };
 
@@ -4778,6 +4799,9 @@ int ft_parse_long_opts(int op, char *optarg)
 		return 0;
 	case LONG_OPT_FI_VERSION:
 		return ft_parse_fi_version_string(optarg);
+	case LONG_OPT_USE_WR:
+		opts.use_wr_api = 1;
+		return 0;
 	default:
 		return EXIT_FAILURE;
 	}
