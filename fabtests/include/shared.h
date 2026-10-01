@@ -210,6 +210,7 @@ struct ft_opts {
 	char *av_name;
 	int sizes_enabled;
 	int use_fi_more;
+	int use_wr_api;
 	int options;
 	enum ft_comp_method comp_method;
 	int machr;
@@ -450,6 +451,41 @@ static inline int ft_use_size(int index, int enable_flags)
 		}				\
 	} while (0)
 
+/*
+ * Post a data transfer, retrying on -FI_EAGAIN. post_fn() is the post call and
+ * progress_fn() drains the given completion queue to free resources before
+ * retrying. On success the sequence counter is advanced. op_str must be a
+ * string literal, as it is concatenated into the error messages. This macro
+ * executes a "return" on error, so it must be used from a function returning a
+ * compatible type.
+ */
+#define FT_POST(post_fn, progress_fn, cq, seq, cq_cntr, op_str, ...)		\
+	do {									\
+		int timeout_save;						\
+		int ret, rc;							\
+										\
+		while (1) {							\
+			ret = post_fn(__VA_ARGS__);				\
+			if (!ret)						\
+				break;						\
+										\
+			if (ret != -FI_EAGAIN) {				\
+				FT_PRINTERR(op_str, ret);			\
+				return ret;					\
+			}							\
+										\
+			timeout_save = timeout;					\
+			timeout = 0;						\
+			rc = progress_fn(cq, seq, cq_cntr);			\
+			if (rc && rc != -FI_EAGAIN) {				\
+				FT_ERR("Failed to get " op_str " completion");	\
+				return rc;					\
+			}							\
+			timeout = timeout_save;					\
+		}								\
+		seq++;								\
+	} while (0)
+
 #define FT_EP_BIND(ep, fd, flags)					\
 	do {								\
 		int ret;						\
@@ -626,6 +662,20 @@ ssize_t ft_post_tx(struct fid_ep *ep, fi_addr_t fi_addr, size_t size,
 ssize_t ft_post_tx_buf(struct fid_ep *ep, fi_addr_t fi_addr, size_t size,
 		       uint64_t data, void *ctx,
 		       void *op_buf, void *op_mr_desc, uint64_t op_tag);
+
+/* Work request API posting (common/wr.c). */
+ssize_t ft_wr_post_tx_buf(struct fid_ep *ep, fi_addr_t fi_addr, size_t size,
+			  uint64_t data, void *ctx, void *op_buf,
+			  void *op_mr_desc, uint64_t op_tag);
+ssize_t ft_wr_post_rx_buf(struct fid_ep *ep, fi_addr_t fi_addr, size_t size,
+			  void *ctx, void *op_buf, void *op_mr_desc,
+			  uint64_t op_tag);
+ssize_t ft_wr_post_rma(enum ft_rma_opcodes rma_op, struct fid_ep *ep,
+		       void *op_buf, void *op_mr_desc, size_t size,
+		       fi_addr_t fi_addr, uint64_t rma_addr, uint64_t rma_key,
+		       uint64_t data, void *ctx);
+void ft_free_wrs(void);
+
 ssize_t ft_rx(struct fid_ep *ep, size_t size);
 ssize_t ft_rx_rma(int iter, enum ft_rma_opcodes rma_op, struct fid_ep *ep,
 		  size_t size);
@@ -713,6 +763,7 @@ enum {
 	LONG_OPT_SYNC_COMP,
 	LONG_OPT_USE_CUDA_PCIE_MAPPING,
 	LONG_OPT_FI_VERSION,
+	LONG_OPT_USE_WR,
 };
 
 extern int debug_assert;
