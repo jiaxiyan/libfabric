@@ -28,22 +28,24 @@ int fi_wr_prepare(struct fid_ep *ep, const struct fi_wr_attr *attr,
 	fi_wr wr, size_t *wr_len);
 
 int fi_wr_modify_addr(struct fid_ep *ep, fi_wr wr,
-	fi_addr_t addr);
+	enum fi_op_type op_type, fi_addr_t addr);
 
 int fi_wr_modify_iov(struct fid_ep *ep, fi_wr wr,
-	const struct iovec *iov, void **desc, size_t count);
+	enum fi_op_type op_type, const struct iovec *iov, void **desc,
+	size_t count);
 
 int fi_wr_modify_rma_iov(struct fid_ep *ep, fi_wr wr,
-	const struct fi_rma_iov *rma_iov, size_t count);
+	enum fi_op_type op_type, const struct fi_rma_iov *rma_iov,
+	size_t count);
 
 int fi_wr_modify_tag(struct fid_ep *ep, fi_wr wr,
-	uint64_t tag, uint64_t ignore);
+	enum fi_op_type op_type, uint64_t tag, uint64_t ignore);
 
 int fi_wr_modify_data(struct fid_ep *ep, fi_wr wr,
-	uint64_t data);
+	enum fi_op_type op_type, uint64_t data);
 
 int fi_wr_modify_flags(struct fid_ep *ep, fi_wr wr,
-	uint64_t flags);
+	enum fi_op_type op_type, uint64_t flags);
 
 ssize_t fi_wr_queue_tx(struct fid_ep *ep, const fi_wr wr,
 	void *context);
@@ -70,6 +72,14 @@ ssize_t fi_wr_queue_trecv(struct fid_ep *ep, const fi_wr wr,
 *wr_len*
 : On input, the number of bytes available in *wr*.  On output, the size of
   the formatted work request, which may be smaller than the input value.
+
+*op_type*
+: The operation type the work request was prepared with, as given in
+  fi_wr_attr::op_type at prepare.  The modify calls take it as an argument
+  because a formatted work request is an opaque, provider defined buffer from
+  which the provider cannot recover the operation; the application, which
+  prepared the work request, supplies it so the provider updates the correct
+  fields.  It must match the op_type the work request was prepared with.
 
 *addr*
 : Peer address: the destination for a transmit work request, or the source
@@ -355,7 +365,7 @@ struct fi_wr_attr attr = { .op_type = FI_OP_WRITE, .op.rma = &rma };
 ret = fi_wr_prepare(ep, &attr, wr, &wr_len);
 
 for (i = 0; i < n; i++) {
-	fi_wr_modify_addr(ep, wr, peers[i]);
+	fi_wr_modify_addr(ep, wr, FI_OP_WRITE, peers[i]);
 	fi_wr_queue_tx(ep, wr, &contexts[i]);
 }
 fi_tx_flush(ep, 0);
