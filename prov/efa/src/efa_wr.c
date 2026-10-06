@@ -327,6 +327,25 @@ static inline int efa_wr_prepare_write(struct efa_base_ep *base_ep,
 
 	return 0;
 }
+
+static inline bool efa_wr_op_is_tx(enum fi_op_type op_type)
+{
+	return op_type == FI_OP_SEND || op_type == FI_OP_TSEND ||
+	       op_type == FI_OP_READ || op_type == FI_OP_WRITE;
+}
+
+static inline enum efa_io_send_op_type
+efa_wr_op_to_send_type(enum fi_op_type op_type)
+{
+	switch (op_type) {
+	case FI_OP_READ:
+		return EFA_IO_RDMA_READ;
+	case FI_OP_WRITE:
+		return EFA_IO_RDMA_WRITE;
+	default:
+		return EFA_IO_SEND;
+	}
+}
 #endif /* HAVE_EFA_DATA_PATH_DIRECT */
 
 /**
@@ -579,40 +598,185 @@ static ssize_t efa_wr_queue_trecv(struct fid_ep *ep_fid, const fi_wr wr,
 static int efa_wr_modify_addr(struct fid_ep *ep_fid, fi_wr wr,
 			      enum fi_op_type op_type, fi_addr_t addr)
 {
+#if HAVE_EFA_DATA_PATH_DIRECT
+	struct efa_base_ep *base_ep;
+	struct efa_io_tx_wqe_128 *wqe = wr;
+	struct efa_av_entry *entry;
+
+	assert(wr);
+
+	if (!efa_wr_op_is_tx(op_type))
+		return 0;
+
+	if (OFI_UNLIKELY(addr == FI_ADDR_UNSPEC))
+		return -FI_EINVAL;
+
+	base_ep = container_of(ep_fid, struct efa_base_ep, util_ep.ep_fid);
+
+	entry = efa_av_addr_to_entry(base_ep->av, addr);
+	if (OFI_UNLIKELY(!entry))
+		return -FI_EINVAL;
+
+	efa_data_path_direct_set_ud_addr(&wqe->meta, entry->ah,
+					 efa_av_entry_ep_addr(entry)->qpn,
+					 efa_av_entry_ep_addr(entry)->qkey);
+	return 0;
+#else
 	return -FI_ENOSYS;
+#endif
 }
 
 static int efa_wr_modify_iov(struct fid_ep *ep_fid, fi_wr wr,
 			     enum fi_op_type op_type, const struct iovec *iov,
 			     void **desc, size_t count)
 {
+#if HAVE_EFA_DATA_PATH_DIRECT
+	struct efa_base_ep *base_ep;
+	int err;
+
+	assert(wr && (!count || (iov && desc)));
+
+	base_ep = container_of(ep_fid, struct efa_base_ep, util_ep.ep_fid);
+
+	if (efa_wr_op_is_tx(op_type)) {
+		struct efa_io_tx_wqe_128 *wqe = wr;
+		struct efa_io_tx_meta_desc *meta = &wqe->meta;
+		enum efa_io_send_op_type send_op =
+			efa_wr_op_to_send_type(op_type);
+		struct ibv_sge sg_list[EFA_IO_TX_DESC_NUM_BUFS];
+		struct efa_io_tx_buf_desc *tx_bufs;
+
+		if (OFI_UNLIKELY(EFA_GET(&meta->ctrl1,
+					 EFA_IO_TX_META_DESC_INLINE_MSG)))
+			return -FI_EINVAL;
+
+		if (send_op == EFA_IO_SEND) {
+			assert(count <= EFA_IO_TX_DESC_NUM_BUFS);
+			tx_bufs = wqe->data.sgl;
+		} else {
+			assert(count <= EFA_IO_TX_DESC_NUM_RDMA_BUFS);
+			tx_bufs = wqe->data.rdma_req.local_mem;
+		}
+
+		err = efa_msg_setup_sge_list(base_ep, iov, desc, count, sg_list);
+		if (OFI_UNLIKELY(err))
+			return err;
+
+		efa_data_path_direct_set_sgl(tx_bufs, meta, sg_list, count);
+
+		if (send_op != EFA_IO_SEND)
+			wqe->data.rdma_req.remote_mem.length = efa_sge_total_bytes(sg_list, count);
+
+		return 0;
+	}
+
+	struct efa_io_rx_desc *rx_buf = wr;
+	uint32_t lkey_ctrl = 0;
+	struct efa_mr *efa_mr;
+	uintptr_t buf_addr;
+	size_t i;
+
+	assert(count > 0 && count <= base_ep->info->rx_attr->iov_limit);
+
+	EFA_SET(&lkey_ctrl, EFA_IO_RX_DESC_FIRST, 1);
+	EFA_SET(&lkey_ctrl, EFA_IO_RX_DESC_LAST, 0);
+
+	for (i = 0; i < count; i++) {
+		if (OFI_UNLIKELY(!desc[i]))
+			return -FI_EINVAL;
+		efa_mr = (struct efa_mr *) desc[i];
+
+		rx_buf[i].lkey_ctrl = lkey_ctrl;
+		if (i == count - 1)
+			EFA_SET(&rx_buf[i].lkey_ctrl,
+				EFA_IO_RX_DESC_LAST, 1);
+
+		buf_addr = (uintptr_t) iov[i].iov_base;
+		rx_buf[i].length = MIN(iov[i].iov_len, UINT16_MAX);
+		EFA_SET(&rx_buf[i].lkey_ctrl, EFA_IO_RX_DESC_LKEY,
+			efa_mr->lkey);
+		rx_buf[i].buf_addr_lo = buf_addr;
+		rx_buf[i].buf_addr_hi = (uint64_t) buf_addr >> 32;
+	}
+
+	return 0;
+#else
 	return -FI_ENOSYS;
+#endif
 }
 
 static int efa_wr_modify_rma_iov(struct fid_ep *ep_fid, fi_wr wr,
 				 enum fi_op_type op_type,
 				 const struct fi_rma_iov *rma_iov, size_t count)
 {
+#if HAVE_EFA_DATA_PATH_DIRECT
+	struct efa_io_tx_wqe_128 *wqe = wr;
+
+	assert(wr && rma_iov);
+	assert(op_type == FI_OP_READ || op_type == FI_OP_WRITE);
+	assert(count == EFA_IO_TX_DESC_NUM_RDMA_BUFS);
+
+	efa_send_wr_set_rdma_addr(&wqe->data.rdma_req.remote_mem, rma_iov[0].key, rma_iov[0].addr);
+	return 0;
+#else
 	return -FI_ENOSYS;
+#endif
 }
 
 static int efa_wr_modify_tag(struct fid_ep *ep_fid, fi_wr wr,
 			     enum fi_op_type op_type, uint64_t tag,
 			     uint64_t ignore)
 {
-	return -FI_ENOSYS;
+	return -FI_EINVAL;
 }
 
 static int efa_wr_modify_data(struct fid_ep *ep_fid, fi_wr wr,
 			      enum fi_op_type op_type, uint64_t data)
 {
+#if HAVE_EFA_DATA_PATH_DIRECT
+	struct efa_io_tx_wqe_128 *wqe = wr;
+
+	assert(wr && efa_wr_op_is_tx(op_type));
+
+	if (OFI_UNLIKELY(!EFA_GET(&wqe->meta.ctrl1, EFA_IO_TX_META_DESC_HAS_IMM)))
+		return -FI_EINVAL;
+
+	efa_send_wr_set_imm_data(&wqe->meta, (__be32) data);
+	return 0;
+#else
 	return -FI_ENOSYS;
+#endif
 }
 
 static int efa_wr_modify_flags(struct fid_ep *ep_fid, fi_wr wr,
 			       enum fi_op_type op_type, uint64_t flags)
 {
+#if HAVE_EFA_DATA_PATH_DIRECT
+	struct efa_io_tx_wqe_128 *wqe = wr;
+
+	assert(wr);
+
+	if (!efa_wr_op_is_tx(op_type))
+		return 0;
+
+	if (OFI_UNLIKELY(!!(flags & FI_REMOTE_CQ_DATA) !=
+			 !!EFA_GET(&wqe->meta.ctrl1, EFA_IO_TX_META_DESC_HAS_IMM)))
+		return -FI_EINVAL;
+
+	if (flags & FI_EFA_WR_HIGH_PPS) {
+		if (OFI_UNLIKELY(efa_wr_op_to_send_type(op_type) !=
+				 EFA_IO_RDMA_WRITE))
+			return -FI_EINVAL;
+		efa_send_wr_set_processing_hint_high_pps(&wqe->meta);
+	} else {
+		EFA_SET(&wqe->meta.ctrl3, EFA_IO_TX_META_DESC_PROCESSING_HINTS,
+			0);
+	}
+
+	return 0;
+#else
 	return -FI_ENOSYS;
+#endif
 }
 
 struct fi_ops_wr efa_wr_ops = {

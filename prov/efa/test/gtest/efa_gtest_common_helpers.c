@@ -6,6 +6,7 @@
 #include "efa_cq.h"
 #include "efa_mr.h"
 #include "efa_device.h"
+#include "efa_wr.h"
 #include "rdm/efa_rdm_ep.h"
 #include "rdm/efa_rdm_mr.h"
 #include "rdm/efa_rdm_rma.h"
@@ -135,6 +136,14 @@ uint32_t efa_test_ep_sq_num_wqe_pending(struct fid_ep *ep)
 
 	base_ep = container_of(ep, struct efa_base_ep, util_ep.ep_fid);
 	return base_ep->qp->data_path_direct_qp.sq.num_wqe_pending;
+}
+
+uint32_t efa_test_ep_rq_wqe_posted(struct fid_ep *ep)
+{
+	struct efa_base_ep *base_ep;
+
+	base_ep = container_of(ep, struct efa_base_ep, util_ep.ep_fid);
+	return base_ep->qp->data_path_direct_qp.rq.wq.wqe_posted;
 }
 
 void efa_test_set_ibv_cq_ex(struct efa_ibv_cq *ibv_cq, int status,
@@ -277,6 +286,25 @@ int efa_test_rdm_rma_verified_copy_iov(struct fid_ep *ep_fid, uint64_t addr,
 	return efa_rdm_rma_verified_copy_iov(ep, &rma, 1, flags, iov, desc);
 }
 
+size_t efa_test_wr_tx_size(void)
+{
+	return efa_wr_tx_size();
+}
+
+size_t efa_test_wr_rx_size(void)
+{
+	return efa_wr_rx_size(g_efa_selected_device_list[0].efa_attr.max_rq_sge);
+}
+
+int efa_test_have_data_path_direct(void)
+{
+#if HAVE_EFA_DATA_PATH_DIRECT
+	return 1;
+#else
+	return 0;
+#endif
+}
+
 int efa_test_device_probe(void)
 {
 	struct fi_info *info = NULL;
@@ -339,4 +367,171 @@ void efa_test_ep_qp_cap(struct fid_ep *ep_fid, size_t *max_send_wr,
 		*max_recv_wr = attr_ex.cap.max_recv_wr;
 	if (max_inline_data)
 		*max_inline_data = attr_ex.cap.max_inline_data;
+}
+
+#if HAVE_EFA_DATA_PATH_DIRECT
+#include "efa_io_defs.h"
+
+uint16_t efa_test_wr_tx_dest_qp_num(const void *wr)
+{
+	return ((const struct efa_io_tx_wqe_128 *) wr)->meta.dest_qp_num;
+}
+
+uint32_t efa_test_wr_tx_qkey(const void *wr)
+{
+	return ((const struct efa_io_tx_wqe_128 *) wr)->meta.qkey;
+}
+
+uint16_t efa_test_wr_tx_ah(const void *wr)
+{
+	return ((const struct efa_io_tx_wqe_128 *) wr)->meta.ah;
+}
+
+uint16_t efa_test_wr_tx_length(const void *wr)
+{
+	return ((const struct efa_io_tx_wqe_128 *) wr)->meta.length;
+}
+
+uint32_t efa_test_wr_tx_imm_data(const void *wr)
+{
+	return ((const struct efa_io_tx_wqe_128 *) wr)->meta.immediate_data;
+}
+
+int efa_test_wr_tx_has_imm(const void *wr)
+{
+	const struct efa_io_tx_wqe_128 *wqe = wr;
+
+	return EFA_GET(&wqe->meta.ctrl1, EFA_IO_TX_META_DESC_HAS_IMM);
+}
+
+int efa_test_wr_tx_inline_msg(const void *wr)
+{
+	const struct efa_io_tx_wqe_128 *wqe = wr;
+
+	return EFA_GET(&wqe->meta.ctrl1, EFA_IO_TX_META_DESC_INLINE_MSG);
+}
+
+int efa_test_wr_tx_op_type(const void *wr)
+{
+	const struct efa_io_tx_wqe_128 *wqe = wr;
+
+	return EFA_GET(&wqe->meta.ctrl1, EFA_IO_TX_META_DESC_OP_TYPE);
+}
+
+int efa_test_wr_tx_high_pps(const void *wr)
+{
+	const struct efa_io_tx_wqe_128 *wqe = wr;
+
+	return EFA_GET(&wqe->meta.ctrl3, EFA_IO_TX_META_DESC_PROCESSING_HINTS) ==
+	       EFA_IO_PROCESSING_HINT_BURST_PPS_SENSITIVE;
+}
+
+static void efa_test_tx_buf_fields(const struct efa_io_tx_buf_desc *buf,
+				   uint64_t *addr, uint32_t *len, uint32_t *lkey)
+{
+	if (addr)
+		*addr = (uint64_t) buf->buf_addr_lo |
+			((uint64_t) buf->buf_addr_hi << 32);
+	if (len)
+		*len = buf->length;
+	if (lkey)
+		*lkey = EFA_GET(&buf->lkey, EFA_IO_TX_BUF_DESC_LKEY);
+}
+
+void efa_test_wr_tx_sgl0(const void *wr, uint64_t *addr, uint32_t *len,
+			 uint32_t *lkey)
+{
+	const struct efa_io_tx_wqe_128 *wqe = wr;
+
+	efa_test_tx_buf_fields(&wqe->data.sgl[0], addr, len, lkey);
+}
+
+void efa_test_wr_tx_rdma_local0(const void *wr, uint64_t *addr, uint32_t *len,
+				uint32_t *lkey)
+{
+	const struct efa_io_tx_wqe_128 *wqe = wr;
+
+	efa_test_tx_buf_fields(&wqe->data.rdma_req.local_mem[0], addr, len,
+			       lkey);
+}
+
+void efa_test_wr_tx_rdma_remote(const void *wr, uint64_t *addr, uint32_t *key,
+				uint32_t *len)
+{
+	const struct efa_io_tx_wqe_128 *wqe = wr;
+	const struct efa_io_remote_mem_addr *rm = &wqe->data.rdma_req.remote_mem;
+
+	if (addr)
+		*addr = (uint64_t) rm->buf_addr_lo |
+			((uint64_t) rm->buf_addr_hi << 32);
+	if (key)
+		*key = rm->rkey;
+	if (len)
+		*len = rm->length;
+}
+
+void efa_test_wr_rx_desc(const void *wr, size_t i, uint64_t *addr,
+			 uint16_t *len, uint32_t *lkey, int *first, int *last)
+{
+	const struct efa_io_rx_desc *rx = (const struct efa_io_rx_desc *) wr + i;
+
+	if (addr)
+		*addr = (uint64_t) rx->buf_addr_lo |
+			((uint64_t) rx->buf_addr_hi << 32);
+	if (len)
+		*len = rx->length;
+	if (lkey)
+		*lkey = EFA_GET(&rx->lkey_ctrl, EFA_IO_RX_DESC_LKEY);
+	if (first)
+		*first = EFA_GET(&rx->lkey_ctrl, EFA_IO_RX_DESC_FIRST);
+	if (last)
+		*last = EFA_GET(&rx->lkey_ctrl, EFA_IO_RX_DESC_LAST);
+}
+
+#else /* !HAVE_EFA_DATA_PATH_DIRECT */
+
+uint16_t efa_test_wr_tx_dest_qp_num(const void *wr) { return 0; }
+uint32_t efa_test_wr_tx_qkey(const void *wr) { return 0; }
+uint16_t efa_test_wr_tx_ah(const void *wr) { return 0; }
+uint16_t efa_test_wr_tx_length(const void *wr) { return 0; }
+uint32_t efa_test_wr_tx_imm_data(const void *wr) { return 0; }
+int efa_test_wr_tx_has_imm(const void *wr) { return 0; }
+int efa_test_wr_tx_inline_msg(const void *wr) { return 0; }
+int efa_test_wr_tx_op_type(const void *wr) { return 0; }
+int efa_test_wr_tx_high_pps(const void *wr) { return 0; }
+void efa_test_wr_tx_sgl0(const void *wr, uint64_t *addr, uint32_t *len,
+			 uint32_t *lkey) {}
+void efa_test_wr_tx_rdma_local0(const void *wr, uint64_t *addr, uint32_t *len,
+				uint32_t *lkey) {}
+void efa_test_wr_tx_rdma_remote(const void *wr, uint64_t *addr, uint32_t *key,
+				uint32_t *len) {}
+void efa_test_wr_rx_desc(const void *wr, size_t i, uint64_t *addr,
+			 uint16_t *len, uint32_t *lkey, int *first, int *last) {}
+
+#endif /* HAVE_EFA_DATA_PATH_DIRECT */
+
+void efa_test_av_addr_fields(struct fid_ep *ep, fi_addr_t addr, uint16_t *ahn,
+			     uint16_t *qpn, uint32_t *qkey)
+{
+	struct efa_base_ep *base_ep;
+	struct efa_av_entry *entry;
+
+	base_ep = container_of(ep, struct efa_base_ep, util_ep.ep_fid);
+	entry = efa_av_addr_to_entry(base_ep->av, addr);
+	if (!entry) {
+		if (ahn)
+			*ahn = 0;
+		if (qpn)
+			*qpn = 0;
+		if (qkey)
+			*qkey = 0;
+		return;
+	}
+
+	if (ahn)
+		*ahn = entry->ah->ahn;
+	if (qpn)
+		*qpn = efa_av_entry_ep_addr(entry)->qpn;
+	if (qkey)
+		*qkey = efa_av_entry_ep_addr(entry)->qkey;
 }

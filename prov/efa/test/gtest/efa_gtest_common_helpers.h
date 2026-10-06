@@ -166,6 +166,22 @@ uint32_t efa_test_ep_sq_num_wqe_pending(struct fid_ep *ep);
 int efa_test_ep_is_wr_started(struct fid_ep *ep);
 
 /**
+ * @brief The transmit/receive work request sizes efa-direct reports in
+ * fi_ep_attr::max_tx_wr_size / max_rx_wr_size, i.e. efa_wr_tx_size() and
+ * efa_wr_rx_size(device max_rq_sge). Both are 0 on builds without the direct
+ * data path.
+ */
+size_t efa_test_wr_tx_size(void);
+size_t efa_test_wr_rx_size(void);
+
+/**
+ * @brief Whether this build was compiled with the direct data path
+ * (HAVE_EFA_DATA_PATH_DIRECT), i.e. efa-direct reports non-zero work request
+ * sizes and advertises FI_WR.
+ */
+int efa_test_have_data_path_direct(void);
+
+/**
  * @brief Initialize the provider so the device queries below are valid, by
  * running a fi_getinfo. Returns 0 on success, a negative fi errno otherwise.
  */
@@ -225,6 +241,46 @@ uint64_t efa_test_rdm_mr_shm_flags(uint64_t mr_flags, enum fi_hmem_iface iface);
 int efa_test_rdm_rma_verified_copy_iov(struct fid_ep *ep_fid, uint64_t addr,
 				       size_t len, uint64_t key, uint32_t flags,
 				       struct iovec *iov, void **desc);
+
+/*
+ * Accessors for a prepared transmit work request (struct efa_io_tx_wqe_128),
+ * so a C++ test can inspect the bytes fi_wr_prepare / fi_wr_modify_* wrote
+ * without including efa_io_defs.h. All take the opaque fi_wr (void *).
+ */
+uint16_t efa_test_wr_tx_dest_qp_num(const void *wr);
+uint32_t efa_test_wr_tx_qkey(const void *wr);
+uint16_t efa_test_wr_tx_ah(const void *wr);
+uint16_t efa_test_wr_tx_length(const void *wr);
+uint32_t efa_test_wr_tx_imm_data(const void *wr);
+int efa_test_wr_tx_has_imm(const void *wr);
+int efa_test_wr_tx_inline_msg(const void *wr);
+int efa_test_wr_tx_op_type(const void *wr);
+int efa_test_wr_tx_high_pps(const void *wr);
+
+/* First send SGL entry (FI_OP_SEND). */
+void efa_test_wr_tx_sgl0(const void *wr, uint64_t *addr, uint32_t *len,
+			 uint32_t *lkey);
+/* RDMA local SGL entry 0 and the remote memory descriptor (FI_OP_READ/WRITE). */
+void efa_test_wr_tx_rdma_local0(const void *wr, uint64_t *addr, uint32_t *len,
+				uint32_t *lkey);
+void efa_test_wr_tx_rdma_remote(const void *wr, uint64_t *addr, uint32_t *key,
+				uint32_t *len);
+
+/*
+ * Accessors for a prepared receive work request (array of
+ * struct efa_io_rx_desc). @p i selects the descriptor.
+ */
+void efa_test_wr_rx_desc(const void *wr, size_t i, uint64_t *addr,
+			 uint16_t *len, uint32_t *lkey, int *first, int *last);
+
+/*
+ * Resolve a fi_addr inserted in the endpoint's AV to the AH number and QPN/QKEY
+ * stored for it, so a modify_addr test can check the WQE got the right peer.
+ */
+void efa_test_av_addr_fields(struct fid_ep *ep, fi_addr_t addr, uint16_t *ahn,
+			     uint16_t *qpn, uint32_t *qkey);
+
+uint32_t efa_test_ep_rq_wqe_posted(struct fid_ep *ep);
 
 #ifdef __cplusplus
 }
