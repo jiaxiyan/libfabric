@@ -805,5 +805,30 @@ EFA_ALWAYS_INLINE void efa_data_path_direct_set_inline_data(struct efa_io_tx_wqe
 	wqe->meta.length = total_length;
 }
 
+/**
+ * @brief Internal utility: Copy an RDMA write's payload into the WQE
+ *
+ * An inline RDMA payload lives in the rdma_req inline area rather than the top
+ * level inline data used by sends, and its length is carried in the remote
+ * memory descriptor as well as in the metadata, so this does not go through
+ * efa_data_path_direct_set_inline_data. The device takes a single local buffer
+ * for RDMA, so there is nothing to concatenate.
+ *
+ * @param wqe Pointer to work queue entry
+ * @param buf Payload to copy, unused when @p len is 0
+ * @param len Payload length in bytes
+ */
+EFA_ALWAYS_INLINE void efa_data_path_direct_set_rdma_inline_data(struct efa_io_tx_wqe_128 *wqe,
+                                                                 const void *buf,
+                                                                 size_t len)
+{
+	struct efa_io_rdma_req_128 *rdma_req = &wqe->data.rdma_req;
+
+	memcpy(rdma_req->inline_data, buf, len);
+	rdma_req->remote_mem.length = len;
+	EFA_SET(&wqe->meta.ctrl1, EFA_IO_TX_META_DESC_INLINE_MSG, 1);
+	wqe->meta.length = len;
+}
+
 #endif /* HAVE_EFA_DATA_PATH_DIRECT */
 #endif /* _EFA_DATA_PATH_DIRECT_INTERNAL_H */
