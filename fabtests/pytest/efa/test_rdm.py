@@ -79,12 +79,22 @@ def test_rdm_pingpong_no_inject_range(cmdline_args, completion_semantic, message
                                completion_semantic, "host_to_host",
                                message_sizes, fabric=fabric)
 
+@pytest.mark.fabric(params=["efa-direct"])
 @pytest.mark.functional
 @pytest.mark.memory_type(memory_type_list_bi_dir)
-def test_rdm_pingpong_use_wr(cmdline_args, completion_semantic, memory_type):
+def test_rdm_pingpong_use_wr(cmdline_args, memory_type, fabric):
     efa_run_client_server_test(cmdline_args, "fi_rdm_pingpong -j 0 --use-wr -M context2",
-                               "short", completion_semantic, memory_type,
-                               None, fabric="efa-direct")
+                               "short", "transmit_complete", memory_type,
+                               None, fabric=fabric)
+
+
+@pytest.mark.fabric(params=["efa-direct"])
+@pytest.mark.functional
+@pytest.mark.memory_type(memory_type_list_bi_dir)
+def test_rdm_bw_use_wr(cmdline_args, memory_type, fabric):
+    efa_run_client_server_test(cmdline_args, "fi_rdm_bw -e rdm -j 0 --use-wr -M context2",
+                               "short", "transmit_complete", memory_type,
+                               None, fabric=fabric)
 
 
 # efa-direct does not support tagged

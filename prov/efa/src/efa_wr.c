@@ -86,6 +86,16 @@ int efa_wr_rx_flush(struct fid_ep *ep_fid, uint64_t flags)
 			err = (err == ENOMEM) ? -FI_EAGAIN : -err;
 		base_ep->recv_wr_index = 0;
 	}
+#if HAVE_EFA_DATA_PATH_DIRECT
+	else if (base_ep->qp->data_path_direct_enabled) {
+		/*
+		 * ring the RQ doorbell directly for descriptors staged by
+		 * fi_wr_queue_recv
+		 */
+		struct efa_data_path_direct_rq *rq = &base_ep->qp->data_path_direct_qp.rq;
+		efa_data_path_direct_rq_ring_doorbell(rq, rq->wq.pc);
+	}
+#endif
 
 	ofi_genlock_unlock(&base_ep->util_ep.lock);
 

@@ -667,6 +667,7 @@ ssize_t ft_wr_post_rma(enum ft_rma_opcodes rma_op, struct fid_ep *ep,
 		       void *op_buf, void *op_mr_desc, size_t size,
 		       fi_addr_t fi_addr, uint64_t rma_addr, uint64_t rma_key,
 		       uint64_t data, void *ctx);
+void ft_wr_set_batch(bool enable);
 void ft_free_wrs(void);
 
 ssize_t ft_rx(struct fid_ep *ep, size_t size);

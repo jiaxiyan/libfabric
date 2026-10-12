@@ -74,6 +74,19 @@ struct ft_wr_key {
 
 static struct ft_wr_key ft_tx_wr_key, ft_rx_wr_key;
 
+/*
+ * When set, the ft_wr_post_* helpers queue the operation without flushing, so a
+ * benchmark can batch a window of posts behind a single doorbell. The caller
+ * must flush with fi_tx_flush() / fi_recv_flush() / fi_trecv_flush() at the
+ * window boundary, before draining the window's completions.
+ */
+static bool ft_wr_batch;
+
+void ft_wr_set_batch(bool enable)
+{
+	ft_wr_batch = enable;
+}
+
 void ft_free_wrs(void)
 {
 	free(ft_tx_wr);
@@ -84,6 +97,7 @@ void ft_free_wrs(void)
 	ft_rx_wr_size = 0;
 	ft_tx_wr_key.valid = false;
 	ft_rx_wr_key.valid = false;
+	ft_wr_batch = false;
 }
 
 static int ft_alloc_wrs(void)
@@ -352,21 +366,32 @@ static ssize_t ft_wr_flush(struct fid_ep *ep_ptr, enum ft_wr_queue_type type)
 	}
 }
 
-static ssize_t ft_wr_queue_and_flush(struct fid_ep *ep_ptr, const fi_wr wr,
-				     void *ctx, enum ft_wr_queue_type type)
+static ssize_t ft_wr_queue_only(struct fid_ep *ep_ptr, const fi_wr wr,
+				void *ctx, enum ft_wr_queue_type type)
 {
 	bool tx = (type == FT_WR_QUEUE_TX);
 	struct fid_cq *cq = tx ? txcq : rxcq;
 	uint64_t *seq = tx ? &tx_seq : &rx_seq;
 	uint64_t *cq_cntr = tx ? &tx_cq_cntr : &rx_cq_cntr;
+
+	FT_POST(ft_wr_queue, ft_progress, cq, (*seq), cq_cntr, "fi_wr_queue",
+		ep_ptr, wr, ctx, type);
+
+	return 0;
+}
+
+static ssize_t ft_wr_queue_and_flush(struct fid_ep *ep_ptr, const fi_wr wr,
+				     void *ctx, enum ft_wr_queue_type type)
+{
 	const char *flush_str =
 		(type == FT_WR_QUEUE_TX) ? "fi_tx_flush" :
 		(type == FT_WR_QUEUE_RECV) ? "fi_recv_flush" :
 					     "fi_trecv_flush";
 	ssize_t ret;
 
-	FT_POST(ft_wr_queue, ft_progress, cq, (*seq), cq_cntr, "fi_wr_queue",
-		ep_ptr, wr, ctx, type);
+	ret = ft_wr_queue_only(ep_ptr, wr, ctx, type);
+	if (ret)
+		return ret;
 
 	ret = ft_wr_flush(ep_ptr, type);
 	if (ret) {
@@ -376,6 +401,15 @@ static ssize_t ft_wr_queue_and_flush(struct fid_ep *ep_ptr, const fi_wr wr,
 	}
 
 	return 0;
+}
+
+static ssize_t ft_wr_submit(struct fid_ep *ep_ptr, const fi_wr wr, void *ctx,
+			    enum ft_wr_queue_type type)
+{
+	if (ft_wr_batch)
+		return ft_wr_queue_only(ep_ptr, wr, ctx, type);
+
+	return ft_wr_queue_and_flush(ep_ptr, wr, ctx, type);
 }
 
 ssize_t ft_wr_post_tx_buf(struct fid_ep *ep_ptr, fi_addr_t fi_addr,
@@ -410,7 +444,7 @@ ssize_t ft_wr_post_tx_buf(struct fid_ep *ep_ptr, fi_addr_t fi_addr,
 			return ret;
 	}
 
-	return ft_wr_queue_and_flush(ep_ptr, ft_tx_wr, ctx, FT_WR_QUEUE_TX);
+	return ft_wr_submit(ep_ptr, ft_tx_wr, ctx, FT_WR_QUEUE_TX);
 }
 
 ssize_t ft_wr_post_rx_buf(struct fid_ep *ep_ptr, fi_addr_t fi_addr,
@@ -447,7 +481,7 @@ ssize_t ft_wr_post_rx_buf(struct fid_ep *ep_ptr, fi_addr_t fi_addr,
 			return ret;
 	}
 
-	return ft_wr_queue_and_flush(ep_ptr, ft_rx_wr, ctx, type);
+	return ft_wr_submit(ep_ptr, ft_rx_wr, ctx, type);
 }
 
 ssize_t ft_wr_post_rma(enum ft_rma_opcodes rma_op, struct fid_ep *ep_ptr,
@@ -496,5 +530,5 @@ ssize_t ft_wr_post_rma(enum ft_rma_opcodes rma_op, struct fid_ep *ep_ptr,
 			return ret;
 	}
 
-	return ft_wr_queue_and_flush(ep_ptr, ft_tx_wr, ctx, FT_WR_QUEUE_TX);
+	return ft_wr_submit(ep_ptr, ft_tx_wr, ctx, FT_WR_QUEUE_TX);
 }

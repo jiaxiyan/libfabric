@@ -621,6 +621,7 @@ int bandwidth(void)
 	 * bandwidth.  */
 
 	if (opts.dst_addr) {
+		ft_wr_set_batch(true);
 		for (i = j = 0; i < opts.iterations + opts.warmup_iterations; i++) {
 			if (i == opts.warmup_iterations)
 				ft_start();
@@ -660,16 +661,32 @@ int bandwidth(void)
 				return ret;
 
 			if (++j == opts.window_size) {
+				if (opts.use_wr_api) {
+					ret = fi_tx_flush(ep, 0);
+					if (ret) {
+						FT_PRINTERR("fi_tx_flush", ret);
+						return ret;
+					}
+				}
 				ret = bw_tx_comp();
 				if (ret)
 					return ret;
 				j = 0;
 			}
 		}
+		if (opts.use_wr_api) {
+			ret = fi_tx_flush(ep, 0);
+			if (ret) {
+				FT_PRINTERR("fi_tx_flush", ret);
+				return ret;
+			}
+		}
 		ret = bw_tx_comp();
 		if (ret)
 			return ret;
+		ft_wr_set_batch(false);
 	} else {
+		ft_wr_set_batch(true);
 		for (i = j = 0; i < opts.iterations + opts.warmup_iterations; i++) {
 			if (i == opts.warmup_iterations)
 				ft_start();
@@ -702,15 +719,33 @@ int bandwidth(void)
 				return ret;
 
 			if (++j == opts.window_size) {
+				if (opts.use_wr_api) {
+					ret = (hints->caps & FI_TAGGED) ?
+						fi_trecv_flush(ep, 0) :
+						fi_recv_flush(ep, 0);
+					if (ret) {
+						FT_PRINTERR("fi_recv_flush", ret);
+						return ret;
+					}
+				}
 				ret = bw_rx_comp(j);
 				if (ret)
 					return ret;
 				j = 0;
 			}
 		}
+		if (opts.use_wr_api) {
+			ret = (hints->caps & FI_TAGGED) ?
+				fi_trecv_flush(ep, 0) : fi_recv_flush(ep, 0);
+			if (ret) {
+				FT_PRINTERR("fi_recv_flush", ret);
+				return ret;
+			}
+		}
 		ret = bw_rx_comp(j);
 		if (ret)
 			return ret;
+		ft_wr_set_batch(false);
 	}
 	ft_stop();
 
@@ -726,6 +761,18 @@ int bandwidth(void)
 static int bw_rma_comp(enum ft_rma_opcodes rma_op, int num_completions)
 {
 	int ret;
+
+	if (opts.use_wr_api && num_completions > 0) {
+		if (rma_op == FT_RMA_WRITEDATA && !opts.dst_addr)
+			ret = (hints->caps & FI_TAGGED) ?
+				fi_trecv_flush(ep, 0) : fi_recv_flush(ep, 0);
+		else
+			ret = fi_tx_flush(ep, 0);
+		if (ret) {
+			FT_PRINTERR("fi flush", ret);
+			return ret;
+		}
+	}
 
 	if (rma_op == FT_RMA_WRITEDATA) {
 		/* for writedata, only the client sends,
@@ -777,6 +824,8 @@ int bandwidth_rma(enum ft_rma_opcodes rma_op, struct fi_rma_iov *remote)
 	ret = ft_sync();
 	if (ret)
 		return ret;
+
+	ft_wr_set_batch(true);
 
 	offset_rma_start = FT_RMA_SYNC_MSG_BYTES +
 			   MAX(ft_tx_prefix_size(), ft_rx_prefix_size());
@@ -904,6 +953,7 @@ int bandwidth_rma(enum ft_rma_opcodes rma_op, struct fi_rma_iov *remote)
 	ret = bw_rma_comp(rma_op, j);
 	if (ret)
 		return ret;
+	ft_wr_set_batch(false);
 	ft_stop();
 
 	if (opts.machr)
