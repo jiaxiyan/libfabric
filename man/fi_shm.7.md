@@ -166,7 +166,8 @@ The *shm* provider checks for the following environment variables:
 
 *FI_SHM_MAX_GDRCOPY_SIZE*
  : Maximum message size for gdrcopy transfers. Messages larger
-   than this size use the IPC protocol with cudaMemcpy.  Default 3072.
+   than this size use the IPC protocol with cudaMemcpy, or copy 
+   out of device memory with cudaMemcpy when SAR is used. Default 3072.
 
 *FI_SHM_USE_XPMEM*
  : SHM can use SAR, CMA or XPMEM for host memory transfers. If

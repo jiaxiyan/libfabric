@@ -449,9 +449,14 @@ static ssize_t ofi_dev_reg_copy_hmem_iov_buf(enum fi_hmem_iface hmem_iface, uint
 	return done;
 }
 
+/*
+ * use_dev_reg selects the device registration handle (e.g. gdrcopy) for
+ * MRs that carry one. Pass false to copy with the iface's copy ops
+ * (e.g. cudaMemcpy) instead.
+ */
 ssize_t ofi_copy_mr_iov(struct ofi_mr **mr, const struct iovec *iov,
 			size_t iov_count, size_t offset, void *buf,
-			size_t size, int dir)
+			size_t size, int dir, bool use_dev_reg)
 {
 	uint64_t done = 0, len;
 	uint64_t hmem_iface, hmem_device, hmem_flags;
@@ -477,7 +482,7 @@ ssize_t ofi_copy_mr_iov(struct ofi_mr **mr, const struct iovec *iov,
 			hmem_data = NULL;
 		}
 
-		if (hmem_flags & OFI_HMEM_DATA_DEV_REG_HANDLE) {
+		if (use_dev_reg && (hmem_flags & OFI_HMEM_DATA_DEV_REG_HANDLE)) {
 			if (dir == OFI_COPY_BUF_TO_IOV)
 				ofi_hmem_dev_reg_copy_to_hmem(
 					hmem_iface, (uint64_t)(uintptr_t) hmem_data,
@@ -507,7 +512,7 @@ ssize_t ofi_copy_from_mr_iov(void *dest, size_t size, struct ofi_mr **mr,
 			     uint64_t iov_offset)
 {
 	return ofi_copy_mr_iov(mr, iov, iov_count, iov_offset, dest, size,
-			       OFI_COPY_IOV_TO_BUF);
+			       OFI_COPY_IOV_TO_BUF, true);
 }
 
 ssize_t ofi_copy_to_mr_iov(struct ofi_mr **mr, const struct iovec *iov,
@@ -515,7 +520,7 @@ ssize_t ofi_copy_to_mr_iov(struct ofi_mr **mr, const struct iovec *iov,
 		       const void *src, size_t size)
 {
 	return ofi_copy_mr_iov(mr, iov, iov_count, iov_offset,
-			       (void *) src, size, OFI_COPY_BUF_TO_IOV);
+			       (void *) src, size, OFI_COPY_BUF_TO_IOV, true);
 }
 
 

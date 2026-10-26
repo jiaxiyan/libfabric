@@ -309,7 +309,11 @@ ssize_t smr_copy_sar(struct smr_ep *ep, struct smr_pend_entry *pend)
 	struct smr_freestack *sar_pool;
 	struct smr_sar_buf *sar_buf;
 	int next_sar_buf = 0;
+	bool use_dev_reg;
 	ssize_t ret;
+
+	use_dev_reg = pend->sar_dir == OFI_COPY_BUF_TO_IOV ||
+		      pend->cmd->hdr.size <= smr_env.max_gdrcopy_size;
 
 	sar_pool = smr_pend_sar_pool(ep, pend);
 	while (pend->bytes_done < pend->cmd->hdr.size &&
@@ -319,7 +323,7 @@ ssize_t smr_copy_sar(struct smr_ep *ep, struct smr_pend_entry *pend)
 
 		ret = ofi_copy_mr_iov(pend->mr, pend->iov, pend->iov_count,
 				      pend->bytes_done, sar_buf->buf,
-				      SMR_SAR_SIZE, pend->sar_dir);
+				      SMR_SAR_SIZE, pend->sar_dir, use_dev_reg);
 		if (ret < 0) {
 			FI_WARN(&smr_prov, FI_LOG_EP_DATA,
 				"SAR copy failed: %s\n", fi_strerror(-ret));
@@ -416,7 +420,8 @@ int smr_select_proto(void **desc, size_t iov_count, bool vma_avail,
 		return smr_proto_sar;
 	}
 
-	if (fastcopy_avail && total_len <= smr_env.max_gdrcopy_size) {
+	if (fastcopy_avail &&
+	    total_len <= MIN(smr_env.max_gdrcopy_size, SMR_INJECT_SIZE)) {
 		if (total_len <= SMR_MSG_DATA_LEN &&
 		    !(op_flags & FI_DELIVERY_COMPLETE))
 			return smr_proto_inline;

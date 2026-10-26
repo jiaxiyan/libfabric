@@ -223,7 +223,9 @@ SHM_INI
 			"Enable use of DSA in SAR protocol. Default: false");
 	fi_param_define(&smr_prov, "max_gdrcopy_size", FI_PARAM_SIZE_T,
 			"Maximum message size for gdrcopy transfers. Messages "
-			"larger than this size use the IPC protocol with cudaMemcpy.",
+			"larger than this size use the IPC protocol with "
+			"cudaMemcpy, or copy out of device memory with "
+			"cudaMemcpy when SAR is used.",
 			 SMR_MAX_GDRCOPY_SIZE);
 	fi_param_define(&smr_prov, "use_xpmem", FI_PARAM_BOOL,
 			"Enable XPMEM over CMA when possible "
