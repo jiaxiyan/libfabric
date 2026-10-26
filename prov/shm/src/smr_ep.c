@@ -309,6 +309,7 @@ ssize_t smr_copy_sar(struct smr_ep *ep, struct smr_pend_entry *pend)
 	struct smr_freestack *sar_pool;
 	struct smr_sar_buf *sar_buf;
 	int next_sar_buf = 0;
+	ssize_t ret;
 
 	sar_pool = smr_pend_sar_pool(ep, pend);
 	while (pend->bytes_done < pend->cmd->hdr.size &&
@@ -316,10 +317,15 @@ ssize_t smr_copy_sar(struct smr_ep *ep, struct smr_pend_entry *pend)
 		sar_buf = smr_freestack_get_entry_from_index(
 				sar_pool, pend->cmd->data.sar[next_sar_buf]);
 
-		pend->bytes_done += ofi_copy_mr_iov(
-					pend->mr, pend->iov, pend->iov_count,
-					pend->bytes_done, sar_buf->buf,
-					SMR_SAR_SIZE, pend->sar_dir);
+		ret = ofi_copy_mr_iov(pend->mr, pend->iov, pend->iov_count,
+				      pend->bytes_done, sar_buf->buf,
+				      SMR_SAR_SIZE, pend->sar_dir);
+		if (ret < 0) {
+			FI_WARN(&smr_prov, FI_LOG_EP_DATA,
+				"SAR copy failed: %s\n", fi_strerror(-ret));
+			return ret;
+		}
+		pend->bytes_done += ret;
 		next_sar_buf++;
 	}
 
@@ -358,7 +364,11 @@ static int smr_format_sar(struct smr_ep *ep, struct smr_cmd *cmd,
 				smr_return_sar_buf_by_index(ep->region,
 							    cmd->data.sar[i]);
 			}
-			return -FI_EAGAIN;
+			/* DSA errors are transient (peer not ready, no free
+			 * command slot); a failed memory copy won't succeed
+			 * on retry. */
+			return pend->sar_copy_fn == &smr_copy_sar ?
+			       ret : -FI_EAGAIN;
 		}
 		smr_peer_data(ep->region)[cmd->hdr.tx_id].sar_status =
 			      pend->sar_copy_fn == &smr_copy_sar ?
