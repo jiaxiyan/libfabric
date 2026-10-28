@@ -79,6 +79,24 @@ static int smr_match_name(struct dlist_entry *item, const void *args)
 		       (char *) args);
 }
 
+static bool smr_probe_pidfd_getfd(int pid_fd)
+{
+	int fd;
+
+	fd = ofi_pidfd_getfd(pid_fd, 0, 0);
+	if (fd >= 0) {
+		close(fd);
+		return true;
+	}
+	if (errno == EBADF)
+		return true;
+
+	FI_INFO(&smr_prov, FI_LOG_AV,
+		"pidfd_getfd not permitted (%s), CUDA VMM IPC disabled for "
+		"this peer\n", strerror(errno));
+	return false;
+}
+
 int smr_map_to_region(struct smr_map *map, int64_t id)
 {
 	struct smr_peer *peer_buf = &map->peers[id];
@@ -151,16 +169,21 @@ int smr_map_to_region(struct smr_map *map, int64_t id)
 
 	assert((uintptr_t) peer % SMR_PREFETCH_SZ == 0);
 
+	peer_buf->pidfd_getfd_ok = false;
 	if (map->flags & SMR_FLAG_HMEM_ENABLED) {
 		ret = ofi_hmem_host_register(peer, peer->total_size);
 		if (ret)
 			FI_WARN(&smr_prov, FI_LOG_AV,
 				"unable to register shm with iface\n");
-		if (ofi_hmem_is_initialized(FI_HMEM_ZE)) {
+		if (ofi_hmem_is_initialized(FI_HMEM_ZE) ||
+		    cuda_is_vmm_ipc_enabled()) {
 			peer_buf->pid_fd = ofi_pidfd_open(peer->pid, 0);
 			if (peer_buf->pid_fd < 0) {
 				FI_WARN(&smr_prov, FI_LOG_AV,
 					"unable to open pidfd\n");
+			} else {
+				peer_buf->pidfd_getfd_ok =
+					smr_probe_pidfd_getfd(peer_buf->pid_fd);
 			}
 		} else {
 			peer_buf->pid_fd = -1;
@@ -234,6 +257,7 @@ void smr_unmap_region(struct smr_map *map, int64_t peer_id, bool local)
 			FI_WARN(&smr_prov, FI_LOG_AV,
 				"unable to unregister shm with iface\n");
 
+		peer->pidfd_getfd_ok = false;
 		if (peer->pid_fd != -1) {
 			close(peer->pid_fd);
 			peer->pid_fd = -1;

@@ -150,11 +150,50 @@ static struct fi_ops smr_domain_fi_ops = {
 	.ops_open = fi_no_ops_open,
 };
 
+static int smr_mr_close(struct fid *fid)
+{
+	struct ofi_mr *mr = container_of(fid, struct ofi_mr, mr_fid.fid);
+	void *export = mr->ipc_export;
+	int ret;
+
+	ret = ofi_mr_close(fid);
+	if (!ret)
+		cuda_vmm_export_free(export);
+	return ret;
+}
+
+static struct fi_ops smr_mr_fi_ops = {
+	.size = sizeof(struct fi_ops),
+	.close = smr_mr_close,
+	.bind = fi_no_bind,
+	.control = fi_no_control,
+	.ops_open = fi_no_ops_open,
+};
+
+static int smr_mr_regattr(struct fid *fid, const struct fi_mr_attr *attr,
+			  uint64_t flags, struct fid_mr **mr_fid)
+{
+	struct ofi_mr *mr;
+	int ret;
+
+	ret = ofi_mr_regattr(fid, attr, flags, mr_fid);
+	if (ret || attr->iface != FI_HMEM_CUDA || (flags & FI_MR_DMABUF))
+		return ret;
+
+	mr = container_of(*mr_fid, struct ofi_mr, mr_fid);
+	if (cuda_vmm_export_create(attr->mr_iov, attr->iov_count,
+				   &mr->ipc_export))
+		return FI_SUCCESS;
+
+	mr->mr_fid.fid.ops = &smr_mr_fi_ops;
+	return FI_SUCCESS;
+}
+
 static struct fi_ops_mr smr_mr_ops = {
 	.size = sizeof(struct fi_ops_mr),
 	.reg = ofi_mr_reg,
 	.regv = ofi_mr_regv,
-	.regattr = ofi_mr_regattr,
+	.regattr = smr_mr_regattr,
 };
 
 int smr_domain_open(struct fid_fabric *fabric, struct fi_info *info,

@@ -42,7 +42,7 @@
 extern "C" {
 #endif
 
-#define SMR_VERSION	10
+#define SMR_VERSION	11
 
 struct smr_env {
 	int	disable_cma;
@@ -76,6 +76,10 @@ extern struct smr_env smr_env;
 #define SMR_BUFFER_RECV		(1 << 1)
 #define SMR_OP_ERROR		(1 << 2)
 #define SMR_RETURN_CMD		(1 << 3)
+#define SMR_IPC_CUDA_VMM	(1 << 4)
+
+#define SMR_IPC_VALID		(1 << 0)
+#define SMR_IPC_CUDA_VMM_VALID	(1 << 1)
 
 enum {
 	smr_proto_inline,	/* inline payload */
@@ -231,6 +235,7 @@ struct smr_peer {
 	fi_addr_t		fiaddr;
 	struct smr_region	*region;
 	int			pid_fd;
+	bool			pidfd_getfd_ok;
 };
 
 #define SMR_MAX_PEERS	256

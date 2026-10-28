@@ -531,6 +531,7 @@ static ssize_t smr_progress_ipc(struct smr_ep *ep, struct smr_cmd *cmd,
 	int ret;
 	struct ofi_mr_entry *mr_entry;
 	struct smr_domain *domain;
+	uint64_t ipc_flags = 0;
 
 	domain = container_of(ep->util_ep.domain, struct smr_domain,
 			      util_domain);
@@ -539,9 +540,16 @@ static ssize_t smr_progress_ipc(struct smr_ep *ep, struct smr_cmd *cmd,
 		ze_set_pid_fd((void **) &cmd->data.ipc_info.ipc_handle,
 			      ep->map->peers[cmd->hdr.rx_id].pid_fd);
 
+	if (cmd->hdr.smr_flags & SMR_IPC_CUDA_VMM) {
+		cuda_vmm_set_pid_fd((void **) &cmd->data.ipc_info.ipc_handle,
+				    ep->map->peers[cmd->hdr.rx_id].pid_fd);
+		ipc_flags = OFI_IPC_CUDA_VMM;
+	}
+
 	//TODO disable IPC if more than 1 interface is initialized
-	ret = ofi_ipc_cache_search(domain->ipc_cache, cmd->hdr.rx_id,
-				   &cmd->data.ipc_info, &mr_entry);
+	ret = ofi_ipc_cache_search_flags(domain->ipc_cache, cmd->hdr.rx_id,
+					 &cmd->data.ipc_info, ipc_flags,
+					 &mr_entry);
 	if (ret)
 		goto out;
 

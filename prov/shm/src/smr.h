@@ -305,18 +305,31 @@ static inline bool smr_vma_enabled(struct smr_ep *ep,
 
 static inline void smr_set_ipc_valid(struct smr_ep *ep, uint64_t id)
 {
-	if (ofi_hmem_is_initialized(FI_HMEM_ZE) &&
-	    ep->map->peers[id].pid_fd == -1)
-		smr_peer_data(ep->region)[id].ipc_valid = 0;
-        else
-		smr_peer_data(ep->region)[id].ipc_valid = 1;
+	struct smr_peer *peer = &ep->map->peers[id];
+	uint16_t valid = SMR_IPC_VALID;
+
+	if (ofi_hmem_is_initialized(FI_HMEM_ZE) && peer->pid_fd == -1)
+		valid = 0;
+	else if (cuda_is_vmm_ipc_enabled() && peer->pidfd_getfd_ok)
+		valid |= SMR_IPC_CUDA_VMM_VALID;
+
+	smr_peer_data(ep->region)[id].ipc_valid = valid;
 }
 
 static inline bool smr_ipc_valid(struct smr_ep *ep, struct smr_region *peer_smr,
 				 int64_t id, int64_t peer_id)
 {
-	return (smr_peer_data(ep->region)[id].ipc_valid &&
-		smr_peer_data(peer_smr)[peer_id].ipc_valid);
+	return (smr_peer_data(ep->region)[id].ipc_valid & SMR_IPC_VALID) &&
+	       (smr_peer_data(peer_smr)[peer_id].ipc_valid & SMR_IPC_VALID);
+}
+
+static inline bool smr_cuda_vmm_ipc_valid(struct smr_ep *ep,
+					  struct smr_region *peer_smr,
+					  int64_t peer_id)
+{
+	return cuda_is_vmm_ipc_enabled() &&
+	       (smr_peer_data(peer_smr)[peer_id].ipc_valid &
+		SMR_IPC_CUDA_VMM_VALID);
 }
 
 static inline struct smr_freestack *smr_pend_sar_pool(

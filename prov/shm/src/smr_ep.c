@@ -274,7 +274,8 @@ static void smr_format_iov(struct smr_cmd *cmd, struct smr_pend_entry *pend)
 
 static int smr_format_ipc(struct smr_cmd *cmd, void *ptr, size_t len,
 			  struct smr_region *smr,
-			  enum fi_hmem_iface iface, uint64_t device)
+			  enum fi_hmem_iface iface, uint64_t device,
+			  void *cuda_vmm_export)
 {
 	int ret;
 	void *base;
@@ -284,6 +285,20 @@ static int smr_format_ipc(struct smr_cmd *cmd, void *ptr, size_t len,
 	cmd->hdr.size = len;
 	cmd->data.ipc_info.iface = iface;
 	cmd->data.ipc_info.device = device;
+
+	if (cuda_vmm_export) {
+		ret = cuda_vmm_export_get_handle(cuda_vmm_export, ptr, len,
+				&base, &base_length,
+				(void **) &cmd->data.ipc_info.ipc_handle);
+		if (ret)
+			return ret;
+
+		cmd->hdr.smr_flags |= SMR_IPC_CUDA_VMM;
+		cmd->data.ipc_info.base_length = (uint64_t) base_length;
+		cmd->data.ipc_info.base_addr = (uintptr_t) base;
+		cmd->data.ipc_info.offset = (uintptr_t) ptr - (uintptr_t) base;
+		return FI_SUCCESS;
+	}
 
 	ret = ofi_hmem_get_base_addr(cmd->data.ipc_info.iface, ptr,
 				     len, &base, &base_length);
@@ -584,7 +599,9 @@ static ssize_t smr_do_ipc(struct smr_ep *ep, struct smr_region *peer_smr,
 	smr_generic_format(cmd, tx_id, rx_id, op, tag, data, smr_flags);
 	assert(iov_count == 1 && desc && desc[0]);
 	ret = smr_format_ipc(cmd, iov[0].iov_base, total_len, ep->region,
-			     desc[0]->iface, desc[0]->device);
+			     desc[0]->iface, desc[0]->device,
+			     smr_cuda_vmm_ipc_valid(ep, peer_smr, rx_id) ?
+			     desc[0]->ipc_export : NULL);
 
 	if (ret) {
 		FI_WARN_ONCE(&smr_prov, FI_LOG_EP_CTRL,
