@@ -4662,6 +4662,10 @@ void ft_longopts_usage()
 		"(PCIe-attached) NICs; omit for CPU-mediated (C2C) NICs.");
 	FT_PRINT_OPTS_USAGE("--fi-version <major.minor>",
 			    "libfabric API version passed to fi_getinfo");
+	FT_PRINT_OPTS_USAGE("--use-cuda-vmm",
+		"Allocate CUDA device buffers with the VMM API\n"
+		"(cuMemCreate + cuMemMap, POSIX fd shareable) instead\n"
+		"of cudaMalloc, like vLLM's CuMemAllocator.");
 }
 
 int debug_assert;
@@ -4683,6 +4687,7 @@ struct option long_opts[] = {
 	{"use-cuda-pcie-mapping", no_argument, NULL, LONG_OPT_USE_CUDA_PCIE_MAPPING},
 	{"fi-version", required_argument, NULL, LONG_OPT_FI_VERSION},
 	{"use-wr", no_argument, NULL, LONG_OPT_USE_WR},
+	{"use-cuda-vmm", no_argument, NULL, LONG_OPT_USE_CUDA_VMM},
 	{NULL, 0, NULL, 0},
 };
 
@@ -4816,6 +4821,9 @@ int ft_parse_long_opts(int op, char *optarg)
 		return ft_parse_fi_version_string(optarg);
 	case LONG_OPT_USE_WR:
 		opts.use_wr_api = 1;
+		return 0;
+	case LONG_OPT_USE_CUDA_VMM:
+		opts.use_cuda_vmm = 1;
 		return 0;
 	default:
 		return EXIT_FAILURE;

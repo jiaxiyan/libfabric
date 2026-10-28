@@ -196,11 +196,24 @@ AS_IF([test x"$have_cuda" = x"1"],
 			[],
 			[have_cuda_dmabuf_mapping_type_pcie=0],
 			[[#include <cuda.h>]])
+
+            have_cuda_vmm=1
+            AC_CHECK_DECL([CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED],
+			[],
+			[have_cuda_vmm=0],
+			[[#include <cuda.h>]])
+
+            AC_CHECK_DECL([CU_CTX_SYNC_MEMOPS],
+			[],
+			[have_cuda_vmm=0],
+			[[#include <cuda.h>]])
       ])
 
 AC_DEFINE_UNQUOTED([HAVE_CUDA_DMABUF], [$have_cuda_dmabuf], [CUDA dmabuf support])
 
 AC_DEFINE_UNQUOTED([HAVE_CUDA_DMABUF_MAPPING_TYPE_PCIE], [$have_cuda_dmabuf_mapping_type_pcie], [CUDA dmabuf PCIe BAR1 support])
+
+AC_DEFINE_UNQUOTED([HAVE_CUDA_VMM], [${have_cuda_vmm:-0}], [CUDA VMM (cuMemCreate) allocation support])
 
 dnl Check for ROCR support. Require fabtests to dlopen ROCR.
 have_rocr=0

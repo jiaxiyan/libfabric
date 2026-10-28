@@ -69,6 +69,33 @@ struct cuda_ops {
 	CUresult (*cuDriverGetVersion)(int* driverVersion);
 	CUresult (*cuMemGetAddressRange)( CUdeviceptr* pbase,
 					  size_t* psize, CUdeviceptr dptr);
+#if HAVE_CUDA_VMM
+	CUresult (*cuMemGetAllocationGranularity)(size_t *granularity,
+				const CUmemAllocationProp *prop,
+				CUmemAllocationGranularity_flags option);
+	CUresult (*cuMemCreate)(CUmemGenericAllocationHandle *handle,
+				size_t size, const CUmemAllocationProp *prop,
+				unsigned long long flags);
+	CUresult (*cuMemRelease)(CUmemGenericAllocationHandle handle);
+	CUresult (*cuMemRetainAllocationHandle)(
+				CUmemGenericAllocationHandle *handle,
+				void *addr);
+	CUresult (*cuMemAddressReserve)(CUdeviceptr *ptr, size_t size,
+					size_t alignment, CUdeviceptr addr,
+					unsigned long long flags);
+	CUresult (*cuMemAddressFree)(CUdeviceptr ptr, size_t size);
+	CUresult (*cuMemMap)(CUdeviceptr ptr, size_t size, size_t offset,
+			     CUmemGenericAllocationHandle handle,
+			     unsigned long long flags);
+	CUresult (*cuMemUnmap)(CUdeviceptr ptr, size_t size);
+	CUresult (*cuMemSetAccess)(CUdeviceptr ptr, size_t size,
+				   const CUmemAccessDesc *desc, size_t count);
+	CUresult (*cuDevicePrimaryCtxGetState)(CUdevice dev,
+					       unsigned int *flags,
+					       int *active);
+	CUresult (*cuDevicePrimaryCtxSetFlags)(CUdevice dev,
+					       unsigned int flags);
+#endif
 };
 
 static struct cuda_ops cuda_ops;
@@ -363,6 +390,32 @@ int ft_cuda_init(void)
 		goto err_dlclose_cuda;
 	}
 
+	if (opts.use_cuda_vmm) {
+#if HAVE_CUDA_VMM
+#define FT_CUDA_VMM_DLSYM(sym)						\
+		cuda_ops.sym = dlsym(cuda_handle, STRINGIFY(sym));	\
+		if (!cuda_ops.sym) {					\
+			FT_ERR("Failed to find " #sym "\n");		\
+			goto err_dlclose_cuda;				\
+		}
+		FT_CUDA_VMM_DLSYM(cuMemGetAllocationGranularity)
+		FT_CUDA_VMM_DLSYM(cuMemCreate)
+		FT_CUDA_VMM_DLSYM(cuMemRelease)
+		FT_CUDA_VMM_DLSYM(cuMemRetainAllocationHandle)
+		FT_CUDA_VMM_DLSYM(cuMemAddressReserve)
+		FT_CUDA_VMM_DLSYM(cuMemAddressFree)
+		FT_CUDA_VMM_DLSYM(cuMemMap)
+		FT_CUDA_VMM_DLSYM(cuMemUnmap)
+		FT_CUDA_VMM_DLSYM(cuMemSetAccess)
+		FT_CUDA_VMM_DLSYM(cuDevicePrimaryCtxGetState)
+		FT_CUDA_VMM_DLSYM(cuDevicePrimaryCtxSetFlags)
+#undef FT_CUDA_VMM_DLSYM
+#else
+		FT_ERR("--use-cuda-vmm: fabtests built without CUDA VMM support\n");
+		goto err_dlclose_cuda;
+#endif
+	}
+
 	cuda_ret = cuda_ops.cudaSetDevice(opts.device);
 	if (cuda_ret != cudaSuccess) {
 		CUDA_ERR(cuda_ret, "cudaSetDevice failed");
@@ -412,10 +465,134 @@ int ft_cuda_cleanup(void)
 	return FI_SUCCESS;
 }
 
+#if HAVE_CUDA_VMM
+static int ft_cuda_vmm_alloc(uint64_t device, void **buf, size_t size)
+{
+	CUmemAllocationProp prop = {0};
+	CUmemGenericAllocationHandle handle;
+	CUmemAccessDesc access = {0};
+	CUdeviceptr ptr = 0;
+	CUresult cu_ret;
+	CUdevice dev;
+	size_t granularity;
+	unsigned int ctx_flags;
+	int rdma_vmm = 0, active;
+
+	cu_ret = cuda_ops.cuDeviceGet(&dev, device);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret, "cuDeviceGet");
+		return -FI_EIO;
+	}
+
+	cu_ret = cuda_ops.cuDevicePrimaryCtxGetState(dev, &ctx_flags, &active);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret,
+					       "cuDevicePrimaryCtxGetState");
+		return -FI_EIO;
+	}
+	if (!(ctx_flags & CU_CTX_SYNC_MEMOPS)) {
+		cu_ret = cuda_ops.cuDevicePrimaryCtxSetFlags(dev,
+					ctx_flags | CU_CTX_SYNC_MEMOPS);
+		if (cu_ret != CUDA_SUCCESS) {
+			ft_cuda_driver_api_print_error(cu_ret,
+					"cuDevicePrimaryCtxSetFlags");
+			return -FI_EIO;
+		}
+	}
+	cuda_ops.cuDeviceGetAttribute(&rdma_vmm,
+		CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
+		dev);
+
+	prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+	prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+	prop.location.id = device;
+	prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+	prop.allocFlags.gpuDirectRDMACapable = rdma_vmm ? 1 : 0;
+
+	cu_ret = cuda_ops.cuMemGetAllocationGranularity(&granularity, &prop,
+				CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret,
+					       "cuMemGetAllocationGranularity");
+		return -FI_EIO;
+	}
+	size = (size + granularity - 1) / granularity * granularity;
+
+	cu_ret = cuda_ops.cuMemCreate(&handle, size, &prop, 0);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret, "cuMemCreate");
+		return -FI_ENOMEM;
+	}
+
+	cu_ret = cuda_ops.cuMemAddressReserve(&ptr, size, 0, 0, 0);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret, "cuMemAddressReserve");
+		goto release;
+	}
+
+	cu_ret = cuda_ops.cuMemMap(ptr, size, 0, handle, 0);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret, "cuMemMap");
+		goto free_va;
+	}
+
+	access.location = prop.location;
+	access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+	cu_ret = cuda_ops.cuMemSetAccess(ptr, size, &access, 1);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret, "cuMemSetAccess");
+		goto unmap;
+	}
+
+	cuda_ops.cuMemRelease(handle);
+	*buf = (void *) ptr;
+	return FI_SUCCESS;
+
+unmap:
+	cuda_ops.cuMemUnmap(ptr, size);
+free_va:
+	cuda_ops.cuMemAddressFree(ptr, size);
+release:
+	cuda_ops.cuMemRelease(handle);
+	return -FI_ENOMEM;
+}
+
+static int ft_cuda_vmm_free(void *buf)
+{
+	CUmemGenericAllocationHandle handle;
+	CUdeviceptr base;
+	CUresult cu_ret;
+	size_t size;
+
+	cu_ret = cuda_ops.cuMemGetAddressRange(&base, &size, (CUdeviceptr) buf);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret, "cuMemGetAddressRange");
+		return -FI_EIO;
+	}
+
+	if (cuda_ops.cuMemRetainAllocationHandle(&handle, buf) != CUDA_SUCCESS)
+		return -FI_ENOENT;
+	cuda_ops.cuMemRelease(handle);
+
+	cu_ret = cuda_ops.cuMemUnmap(base, size);
+	if (cu_ret != CUDA_SUCCESS) {
+		ft_cuda_driver_api_print_error(cu_ret, "cuMemUnmap");
+		return -FI_EIO;
+	}
+	cuda_ops.cuMemAddressFree(base, size);
+	return FI_SUCCESS;
+}
+#endif
+
 int ft_cuda_alloc(uint64_t device, void **buf, size_t size)
 {
 	cudaError_t cuda_ret;
 	int ret;
+
+#if HAVE_CUDA_VMM
+	if (opts.use_cuda_vmm)
+		return ft_cuda_vmm_alloc(device, buf, size);
+#endif
 
 	cuda_ret = cuda_ops.cudaMalloc(buf, size);
 
@@ -451,6 +628,15 @@ int ft_cuda_alloc_host(void **buf, size_t size)
 int ft_cuda_free(void *buf)
 {
 	cudaError_t cuda_ret;
+
+#if HAVE_CUDA_VMM
+	if (opts.use_cuda_vmm && buf) {
+		int ret = ft_cuda_vmm_free(buf);
+
+		if (ret != -FI_ENOENT)
+			return ret;
+	}
+#endif
 
 	cuda_ret = cuda_ops.cudaFree(buf);
 	if (cuda_ret == cudaSuccess)

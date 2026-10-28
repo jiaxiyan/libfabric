@@ -303,3 +303,16 @@ def test_rma_bw_use_wr(cmdline_args, rma_operation_type, rma_bw_completion_seman
     command = command + " -o " + rma_operation_type
     efa_run_client_server_test(cmdline_args, command, "short", rma_bw_completion_semantic,
                                rma_bw_memory_type, None, fabric=rma_fabric)
+
+
+@pytest.mark.functional
+@pytest.mark.cuda_memory
+@pytest.mark.fabric(params=["efa", "efa-direct"])
+@pytest.mark.parametrize("operation_type", ["read", "write"])
+@pytest.mark.parametrize("message_size", [64, 4096, 65536, 1048576, 8388608])
+def test_rma_bw_cuda_vmm(cmdline_args, operation_type, message_size,
+                         rma_fabric):
+    command = "fi_rma_bw -e rdm --use-cuda-vmm -o " + operation_type
+    efa_run_client_server_test(cmdline_args, command, "short",
+                               "transmit_complete", "cuda_to_cuda",
+                               message_size, fabric=rma_fabric)
