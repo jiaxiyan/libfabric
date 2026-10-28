@@ -233,6 +233,19 @@ int cuda_get_base_addr(const void *ptr, size_t len, void **base, size_t *size);
 
 bool cuda_is_ipc_enabled(void);
 int cuda_get_ipc_handle_size(size_t *size);
+bool cuda_is_vmm_ipc_enabled(void);
+bool cuda_is_legacy_ipc_capable(const void *ptr);
+int cuda_vmm_export_create(const struct iovec *iov, size_t iov_count,
+			   void **export);
+void cuda_vmm_export_free(void *export);
+int cuda_vmm_export_get_handle(void *export, const void *ptr, size_t len,
+			       void **base, size_t *base_length,
+			       void **handle);
+void cuda_vmm_set_pid_fd(void **handle, int pid_fd);
+bool cuda_vmm_handle_match(const void *a, const void *b);
+int cuda_vmm_open_handle(void **handle, size_t size, uint64_t device,
+			 void **ipc_ptr);
+int cuda_vmm_close_handle(void *ipc_ptr, size_t size, void **handle);
 bool cuda_is_gdrcopy_enabled(void);
 int cuda_dev_alloc(uint64_t device, uint64_t size, uint64_t alignment,
 		   uint64_t flags, void **addr, int *fd, uint64_t *offset);

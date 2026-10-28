@@ -34,13 +34,25 @@
 #include <ofi_util.h>
 #include <ofi_hmem.h>
 
+static int ipc_cache_open_handle(struct ofi_mr_entry *entry)
+{
+	if (entry->info.flags & OFI_IPC_CUDA_VMM)
+		return cuda_vmm_open_handle((void **) &entry->info.handle,
+					    entry->info.iov.iov_len,
+					    entry->info.device,
+					    &entry->info.mapped_addr);
+
+	return ofi_hmem_open_handle(entry->info.iface,
+				    (void **) &entry->info.handle,
+				    entry->info.iov.iov_len, entry->info.device,
+				    &entry->info.mapped_addr);
+}
+
 static int ipc_cache_add_region(struct ofi_mr_cache *cache, struct ofi_mr_entry *entry)
 {
 	int ret;
 
-	ret = ofi_hmem_open_handle(entry->info.iface, (void **)&entry->info.handle,
-				   entry->info.iov.iov_len, entry->info.device,
-				   &entry->info.mapped_addr);
+	ret = ipc_cache_open_handle(entry);
 	if (ret == -FI_EALREADY) {
 		/*
 		 * There is a chance we can get the -FI_EALREADY from the
@@ -59,9 +71,7 @@ static int ipc_cache_add_region(struct ofi_mr_cache *cache, struct ofi_mr_entry 
 		 * and close the handles.
 		 */
 		ofi_mr_cache_flush(cache, false);
-		ret = ofi_hmem_open_handle(entry->info.iface, (void **)&entry->info.handle,
-						entry->info.iov.iov_len, entry->info.device,
-						&entry->info.mapped_addr);
+		ret = ipc_cache_open_handle(entry);
 	}
 	if (ret) {
 		FI_WARN(&core_prov, FI_LOG_CORE,
@@ -74,9 +84,14 @@ static int ipc_cache_add_region(struct ofi_mr_cache *cache, struct ofi_mr_entry 
 static void ipc_cache_delete_region(struct ofi_mr_cache *cache,
 				     struct ofi_mr_entry *entry)
 {
-	ofi_hmem_close_handle(entry->info.iface,
-			      entry->info.mapped_addr,
-			      (void **) &entry->info.handle);
+	if (entry->info.flags & OFI_IPC_CUDA_VMM)
+		cuda_vmm_close_handle(entry->info.mapped_addr,
+				      entry->info.iov.iov_len,
+				      (void **) &entry->info.handle);
+	else
+		ofi_hmem_close_handle(entry->info.iface,
+				      entry->info.mapped_addr,
+				      (void **) &entry->info.handle);
 }
 
 /**
@@ -155,6 +170,14 @@ int ofi_ipc_cache_search(struct ofi_mr_cache *cache, uint64_t peer_id,
 			 struct ipc_info *ipc_info,
 			 struct ofi_mr_entry **mr_entry)
 {
+	return ofi_ipc_cache_search_flags(cache, peer_id, ipc_info, 0,
+					  mr_entry);
+}
+
+int ofi_ipc_cache_search_flags(struct ofi_mr_cache *cache, uint64_t peer_id,
+			       struct ipc_info *ipc_info, uint64_t flags,
+			       struct ofi_mr_entry **mr_entry)
+{
 	struct ofi_mr_info info = {0};
 	struct ofi_mr_entry *entry;
 	int ret;
@@ -163,6 +186,7 @@ int ofi_ipc_cache_search(struct ofi_mr_cache *cache, uint64_t peer_id,
 	info.iov.iov_base = (void *) (uintptr_t) ipc_info->base_addr;
 	info.iov.iov_len = ipc_info->base_length;
 	info.iface = ipc_info->iface;
+	info.flags = flags;
 	info.peer_id = peer_id;
 
 	ipc_handle_size = ofi_hmem_get_ipc_handle_size(info.iface);

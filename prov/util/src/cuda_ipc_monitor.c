@@ -40,6 +40,12 @@ static bool cuda_ipc_monitor_valid(struct ofi_mem_monitor *monitor,
 			const struct ofi_mr_info *info,
 			struct ofi_mr_entry *entry)
 {
+	if ((info->flags ^ entry->info.flags) & OFI_IPC_CUDA_VMM)
+		return false;
+
+	if (info->flags & OFI_IPC_CUDA_VMM)
+		return cuda_vmm_handle_match(info->handle, entry->info.handle);
+
 	return (memcmp((void **)&info->handle,
 		(void **)&entry->info.handle,
 		sizeof(cudaIpcMemHandle_t)) == 0);

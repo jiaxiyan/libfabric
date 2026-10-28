@@ -338,6 +338,7 @@ struct ofi_mr {
 	enum fi_hmem_iface iface;
 	uint64_t device;
 	void *hmem_data;
+	void *ipc_export;
 };
 
 static inline bool ofi_mr_all_host(struct ofi_mr **mr, size_t count)
@@ -453,6 +454,12 @@ void ofi_ipc_cache_destroy(struct ofi_mr_cache *cache);
 int  ofi_ipc_cache_search(struct ofi_mr_cache *cache, uint64_t peer_id,
 			  struct ipc_info *ipc_info,
 			  struct ofi_mr_entry **mr_entry);
+
+#define OFI_IPC_CUDA_VMM	(1ULL << 0)
+
+int  ofi_ipc_cache_search_flags(struct ofi_mr_cache *cache, uint64_t peer_id,
+				struct ipc_info *ipc_info, uint64_t flags,
+				struct ofi_mr_entry **mr_entry);
 
 static inline bool ofi_mr_cache_full(struct ofi_mr_cache *cache)
 {

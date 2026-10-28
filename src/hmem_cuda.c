@@ -76,12 +76,31 @@ CUresult CUDAAPI cuDevicePrimaryCtxSetFlags_v2(CUdevice dev,
 #endif
 
 #if HAVE_CUDA_CTX_SYNC_MEMOPS
-#define CUDA_DRIVER_OPTIONAL_FUNCS_DEF(_) \
+#define CUDA_DRIVER_SYNC_MEMOPS_FUNCS_DEF(_) \
 	_(cuDevicePrimaryCtxGetState) \
 	_(cuDevicePrimaryCtxSetFlags_v2)
 #else
-#define CUDA_DRIVER_OPTIONAL_FUNCS_DEF(_)
+#define CUDA_DRIVER_SYNC_MEMOPS_FUNCS_DEF(_)
 #endif
+
+#if HAVE_CUDA_VMM_IPC
+#define CUDA_DRIVER_VMM_FUNCS_DEF(_) \
+	_(cuMemRetainAllocationHandle) \
+	_(cuMemRelease) \
+	_(cuMemExportToShareableHandle) \
+	_(cuMemImportFromShareableHandle) \
+	_(cuMemAddressReserve) \
+	_(cuMemAddressFree) \
+	_(cuMemMap) \
+	_(cuMemUnmap) \
+	_(cuMemSetAccess)
+#else
+#define CUDA_DRIVER_VMM_FUNCS_DEF(_)
+#endif
+
+#define CUDA_DRIVER_OPTIONAL_FUNCS_DEF(_) \
+	CUDA_DRIVER_SYNC_MEMOPS_FUNCS_DEF(_) \
+	CUDA_DRIVER_VMM_FUNCS_DEF(_)
 
 #define CUDA_DRIVER_FUNCS_DEF(_)	\
 	_(cuGetErrorName)		\
@@ -142,6 +161,7 @@ static struct {
 	bool  p2p_access_supported;
 	bool  use_gdrcopy;
 	bool  use_ipc;
+	bool  use_vmm_ipc;
 	bool  dmabuf_supported;
 	void *driver_handle;
 	void *runtime_handle;
@@ -152,6 +172,7 @@ static struct {
 	.p2p_access_supported = false,
 	.use_gdrcopy          = false,
 	.use_ipc              = false,
+	.use_vmm_ipc          = false,
 	.dmabuf_supported     = false,
 	.driver_handle        = NULL,
 	.runtime_handle       = NULL,
@@ -200,6 +221,31 @@ static struct {
 					       int *active);
 	CUresult (*cuDevicePrimaryCtxSetFlags_v2)(CUdevice dev,
 						  unsigned int flags);
+#endif
+#if HAVE_CUDA_VMM_IPC
+	CUresult (*cuMemRetainAllocationHandle)(
+				CUmemGenericAllocationHandle *handle,
+				void *addr);
+	CUresult (*cuMemRelease)(CUmemGenericAllocationHandle handle);
+	CUresult (*cuMemExportToShareableHandle)(
+				void *shareable_handle,
+				CUmemGenericAllocationHandle handle,
+				CUmemAllocationHandleType handle_type,
+				unsigned long long flags);
+	CUresult (*cuMemImportFromShareableHandle)(
+				CUmemGenericAllocationHandle *handle,
+				void *os_handle,
+				CUmemAllocationHandleType handle_type);
+	CUresult (*cuMemAddressReserve)(CUdeviceptr *ptr, size_t size,
+					size_t alignment, CUdeviceptr addr,
+					unsigned long long flags);
+	CUresult (*cuMemAddressFree)(CUdeviceptr ptr, size_t size);
+	CUresult (*cuMemMap)(CUdeviceptr ptr, size_t size, size_t offset,
+			     CUmemGenericAllocationHandle handle,
+			     unsigned long long flags);
+	CUresult (*cuMemUnmap)(CUdeviceptr ptr, size_t size);
+	CUresult (*cuMemSetAccess)(CUdeviceptr ptr, size_t size,
+				   const CUmemAccessDesc *desc, size_t count);
 #endif
 	CUresult (*cuCtxCreate_v2)(CUcontext *pctx, unsigned int flags, CUdevice dev);
 	CUresult (*cuCtxDestroy)(CUcontext ctx);
@@ -644,6 +690,355 @@ int cuda_get_base_addr(const void *ptr, size_t len, void **base, size_t *size)
 	return -FI_EIO;
 }
 
+struct cuda_vmm_ipc_handle {
+	uint64_t	buffer_id;
+	uint64_t	alloc_handle;
+	int32_t		export_fd;
+	int32_t		pid_fd;
+};
+
+#ifdef static_assert
+static_assert(sizeof(struct cuda_vmm_ipc_handle) <= MAX_MR_HANDLE_SIZE,
+	      "cuda vmm ipc handle does not fit in the ipc handle");
+#endif
+
+#if HAVE_CUDA_VMM_IPC
+static bool cuda_vmm_ipc_syms_loaded(void)
+{
+	return cuda_ops.cuMemRetainAllocationHandle &&
+	       cuda_ops.cuMemRelease &&
+	       cuda_ops.cuMemExportToShareableHandle &&
+	       cuda_ops.cuMemImportFromShareableHandle &&
+	       cuda_ops.cuMemAddressReserve &&
+	       cuda_ops.cuMemAddressFree &&
+	       cuda_ops.cuMemMap &&
+	       cuda_ops.cuMemUnmap &&
+	       cuda_ops.cuMemSetAccess;
+}
+
+bool cuda_is_vmm_ipc_enabled(void)
+{
+	return cuda_attr.use_vmm_ipc;
+}
+
+bool cuda_is_legacy_ipc_capable(const void *ptr)
+{
+	int capable = 1;
+
+	if (ofi_cuPointerGetAttribute(&capable,
+			CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE,
+			(CUdeviceptr) ptr) != CUDA_SUCCESS)
+		return true;
+
+	return capable;
+}
+
+struct cuda_vmm_export_entry {
+	uintptr_t	base;
+	size_t		length;
+	uint64_t	buffer_id;
+	int		fd;
+};
+
+struct cuda_vmm_export {
+	size_t				count;
+	struct cuda_vmm_export_entry	entry[];
+};
+
+static int cuda_vmm_export_one(void *ptr, struct cuda_vmm_export_entry *entry)
+{
+	CUmemGenericAllocationHandle alloc_handle;
+	unsigned long long buffer_id;
+	void *base;
+	CUresult cu_ret;
+	int fd = -1;
+	int ret;
+
+	ret = cuda_get_base_addr(ptr, 1, &base, &entry->length);
+	if (ret)
+		return ret;
+	entry->base = (uintptr_t) base;
+
+	cu_ret = ofi_cuPointerGetAttribute(&buffer_id,
+					   CU_POINTER_ATTRIBUTE_BUFFER_ID,
+					   (CUdeviceptr) ptr);
+	if (cu_ret != CUDA_SUCCESS) {
+		CUDA_DRIVER_LOG_ERR(cu_ret, "cuPointerGetAttribute");
+		return -FI_EINVAL;
+	}
+	entry->buffer_id = buffer_id;
+
+	cu_ret = cuda_ops.cuMemRetainAllocationHandle(&alloc_handle, ptr);
+	if (cu_ret != CUDA_SUCCESS) {
+		CUDA_DRIVER_LOG_ERR(cu_ret, "cuMemRetainAllocationHandle");
+		return -FI_EINVAL;
+	}
+
+	cu_ret = cuda_ops.cuMemExportToShareableHandle(&fd, alloc_handle,
+				CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
+	cuda_ops.cuMemRelease(alloc_handle);
+	if (cu_ret != CUDA_SUCCESS) {
+		FI_INFO(&core_prov, FI_LOG_CORE,
+			"cuMemExportToShareableHandle failed (%d), allocation "
+			"was not created with POSIX fd handles\n", cu_ret);
+		return -FI_EINVAL;
+	}
+
+	entry->fd = fd;
+	return FI_SUCCESS;
+}
+
+void cuda_vmm_export_free(void *export)
+{
+	struct cuda_vmm_export *exp = export;
+	size_t i;
+
+	if (!exp)
+		return;
+
+	for (i = 0; i < exp->count; i++)
+		close(exp->entry[i].fd);
+	free(exp);
+}
+
+int cuda_vmm_export_create(const struct iovec *iov, size_t iov_count,
+			   void **export)
+{
+	struct cuda_vmm_export *exp = NULL, *tmp;
+	size_t i, cap = 0;
+	uintptr_t ptr, end;
+	int ret;
+
+	*export = NULL;
+	if (!cuda_attr.use_vmm_ipc || !iov_count ||
+	    cuda_is_legacy_ipc_capable(iov[0].iov_base))
+		return -FI_ENODATA;
+
+	for (i = 0; i < iov_count; i++) {
+		ptr = (uintptr_t) iov[i].iov_base;
+		end = ptr + iov[i].iov_len;
+		while (ptr < end) {
+			if (!exp || exp->count == cap) {
+				cap = cap ? cap * 2 : 4;
+				tmp = realloc(exp, sizeof(*exp) +
+					      cap * sizeof(exp->entry[0]));
+				if (!tmp) {
+					ret = -FI_ENOMEM;
+					goto err;
+				}
+				if (!exp)
+					tmp->count = 0;
+				exp = tmp;
+			}
+			ret = cuda_vmm_export_one((void *) ptr,
+						  &exp->entry[exp->count]);
+			if (ret)
+				goto err;
+			ptr = exp->entry[exp->count].base +
+			      exp->entry[exp->count].length;
+			exp->count++;
+		}
+	}
+
+	*export = exp;
+	return FI_SUCCESS;
+err:
+	cuda_vmm_export_free(exp);
+	return ret;
+}
+
+int cuda_vmm_export_get_handle(void *export, const void *ptr, size_t len,
+			       void **base, size_t *base_length,
+			       void **handle)
+{
+	struct cuda_vmm_ipc_handle *vmm = (struct cuda_vmm_ipc_handle *) handle;
+	struct cuda_vmm_export *exp = export;
+	struct cuda_vmm_export_entry *e;
+	size_t lo = 0, hi = exp->count, mid;
+	uintptr_t addr = (uintptr_t) ptr;
+
+	while (lo < hi) {
+		mid = (lo + hi) / 2;
+		e = &exp->entry[mid];
+		if (addr < e->base)
+			hi = mid;
+		else if (addr >= e->base + e->length)
+			lo = mid + 1;
+		else
+			goto found;
+	}
+	return -FI_EINVAL;
+
+found:
+	if (addr + len > e->base + e->length)
+		return -FI_EINVAL;
+
+	memset(vmm, 0, MAX_MR_HANDLE_SIZE);
+	vmm->buffer_id = e->buffer_id;
+	vmm->export_fd = e->fd;
+	vmm->pid_fd = -1;
+	*base = (void *) e->base;
+	*base_length = e->length;
+	return FI_SUCCESS;
+}
+
+void cuda_vmm_set_pid_fd(void **handle, int pid_fd)
+{
+	((struct cuda_vmm_ipc_handle *) handle)->pid_fd = pid_fd;
+}
+
+bool cuda_vmm_handle_match(const void *a, const void *b)
+{
+	return ((const struct cuda_vmm_ipc_handle *) a)->buffer_id ==
+	       ((const struct cuda_vmm_ipc_handle *) b)->buffer_id;
+}
+
+static int cuda_vmm_set_access(CUdeviceptr ptr, size_t size)
+{
+	CUmemAccessDesc desc = {0};
+	CUresult cu_ret;
+	int dev, granted = 0;
+
+	desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+	desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+	for (dev = 0; dev < cuda_attr.device_count; dev++) {
+		desc.location.id = dev;
+		cu_ret = cuda_ops.cuMemSetAccess(ptr, size, &desc, 1);
+		if (cu_ret == CUDA_SUCCESS)
+			granted++;
+	}
+
+	return granted ? FI_SUCCESS : -FI_EACCES;
+}
+
+int cuda_vmm_open_handle(void **handle, size_t size, uint64_t device,
+			 void **ipc_ptr)
+{
+	struct cuda_vmm_ipc_handle *vmm = (struct cuda_vmm_ipc_handle *) handle;
+	CUmemGenericAllocationHandle alloc_handle;
+	CUdeviceptr ptr = 0;
+	CUresult cu_ret;
+	int fd, ret = -FI_EINVAL;
+
+	fd = ofi_pidfd_getfd(vmm->pid_fd, vmm->export_fd, 0);
+	if (fd < 0) {
+		FI_WARN(&core_prov, FI_LOG_CORE,
+			"pidfd_getfd failed for cuda vmm ipc: %s\n",
+			strerror(errno));
+		return -FI_EINVAL;
+	}
+
+	cu_ret = cuda_ops.cuMemImportFromShareableHandle(&alloc_handle,
+				(void *) (uintptr_t) fd,
+				CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR);
+	close(fd);
+	if (cu_ret != CUDA_SUCCESS) {
+		CUDA_DRIVER_LOG_ERR(cu_ret, "cuMemImportFromShareableHandle");
+		return -FI_EINVAL;
+	}
+
+	cu_ret = cuda_ops.cuMemAddressReserve(&ptr, size, 0, 0, 0);
+	if (cu_ret != CUDA_SUCCESS) {
+		CUDA_DRIVER_LOG_ERR(cu_ret, "cuMemAddressReserve");
+		goto release;
+	}
+
+	cu_ret = cuda_ops.cuMemMap(ptr, size, 0, alloc_handle, 0);
+	if (cu_ret != CUDA_SUCCESS) {
+		CUDA_DRIVER_LOG_ERR(cu_ret, "cuMemMap");
+		goto free_va;
+	}
+
+	ret = cuda_vmm_set_access(ptr, size);
+	if (ret) {
+		FI_WARN(&core_prov, FI_LOG_CORE,
+			"no local device can access imported cuda vmm memory\n");
+		goto unmap;
+	}
+
+	vmm->alloc_handle = alloc_handle;
+	*ipc_ptr = (void *) ptr;
+	return FI_SUCCESS;
+
+unmap:
+	cuda_ops.cuMemUnmap(ptr, size);
+free_va:
+	cuda_ops.cuMemAddressFree(ptr, size);
+release:
+	cuda_ops.cuMemRelease(alloc_handle);
+	return ret;
+}
+
+int cuda_vmm_close_handle(void *ipc_ptr, size_t size, void **handle)
+{
+	struct cuda_vmm_ipc_handle *vmm = (struct cuda_vmm_ipc_handle *) handle;
+	CUresult cu_ret;
+	int ret = FI_SUCCESS;
+
+	cu_ret = cuda_ops.cuMemUnmap((CUdeviceptr) ipc_ptr, size);
+	if (cu_ret != CUDA_SUCCESS) {
+		CUDA_DRIVER_LOG_ERR(cu_ret, "cuMemUnmap");
+		ret = -FI_EINVAL;
+	}
+	cuda_ops.cuMemAddressFree((CUdeviceptr) ipc_ptr, size);
+	cuda_ops.cuMemRelease(vmm->alloc_handle);
+	return ret;
+}
+#else
+static bool cuda_vmm_ipc_syms_loaded(void)
+{
+	return false;
+}
+
+bool cuda_is_vmm_ipc_enabled(void)
+{
+	return false;
+}
+
+bool cuda_is_legacy_ipc_capable(const void *ptr)
+{
+	return true;
+}
+
+int cuda_vmm_export_create(const struct iovec *iov, size_t iov_count,
+			   void **export)
+{
+	*export = NULL;
+	return -FI_ENODATA;
+}
+
+void cuda_vmm_export_free(void *export)
+{
+}
+
+int cuda_vmm_export_get_handle(void *export, const void *ptr, size_t len,
+			       void **base, size_t *base_length,
+			       void **handle)
+{
+	return -FI_ENOSYS;
+}
+
+void cuda_vmm_set_pid_fd(void **handle, int pid_fd)
+{
+}
+
+bool cuda_vmm_handle_match(const void *a, const void *b)
+{
+	return false;
+}
+
+int cuda_vmm_open_handle(void **handle, size_t size, uint64_t device,
+			 void **ipc_ptr)
+{
+	return -FI_ENOSYS;
+}
+
+int cuda_vmm_close_handle(void *ipc_ptr, size_t size, void **handle)
+{
+	return -FI_ENOSYS;
+}
+#endif
+
 /*
  * Convenience macro to dynamically load symbols in cuda_ops struct
  * Trailing semicolon is necessary for use with higher-order macro
@@ -1023,6 +1418,7 @@ int cuda_hmem_init(void)
 	 */
 	cuda_attr.use_ipc =
 		cuda_attr.p2p_access_supported || cuda_attr.nvml_device_count == 1;
+	cuda_attr.use_vmm_ipc = cuda_attr.use_ipc && cuda_vmm_ipc_syms_loaded();
 
 	return FI_SUCCESS;
 
@@ -1616,5 +2012,52 @@ int cuda_put_dmabuf_fd(int fd)
 int cuda_set_sync_memops(void *ptr)
 {
         return FI_SUCCESS;
+}
+bool cuda_is_vmm_ipc_enabled(void)
+{
+	return false;
+}
+
+bool cuda_is_legacy_ipc_capable(const void *ptr)
+{
+	return true;
+}
+
+int cuda_vmm_export_create(const struct iovec *iov, size_t iov_count,
+			   void **export)
+{
+	*export = NULL;
+	return -FI_ENODATA;
+}
+
+void cuda_vmm_export_free(void *export)
+{
+}
+
+int cuda_vmm_export_get_handle(void *export, const void *ptr, size_t len,
+			       void **base, size_t *base_length,
+			       void **handle)
+{
+	return -FI_ENOSYS;
+}
+
+void cuda_vmm_set_pid_fd(void **handle, int pid_fd)
+{
+}
+
+bool cuda_vmm_handle_match(const void *a, const void *b)
+{
+	return false;
+}
+
+int cuda_vmm_open_handle(void **handle, size_t size, uint64_t device,
+			 void **ipc_ptr)
+{
+	return -FI_ENOSYS;
+}
+
+int cuda_vmm_close_handle(void *ipc_ptr, size_t size, void **handle)
+{
+	return -FI_ENOSYS;
 }
 #endif /* HAVE_CUDA */
