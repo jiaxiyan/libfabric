@@ -54,15 +54,20 @@ static int xpu_alloc(struct efa_xpu_ctx *xctx, uint64_t size,
 
 /**
  * xpu_import - map host address into device address space.
+ *
+ * @fd is the dmabuf the host address was exported as, for a consumer that can
+ * only import certain address types that way, and -1 when there is none. A
+ * caller that passes one must also set FI_XPU_IMPORT_DMABUF, which is what
+ * tells the consumer the fd is there to use.
  */
 static int xpu_import(struct efa_xpu_ctx *xctx, void *host_addr,
-		      uint64_t size, uint64_t flags, void **dev_addr)
+		      uint64_t size, int fd, uint64_t flags, void **dev_addr)
 {
 	struct fi_xpu_attr *attr = &xctx->attr;
 
 	if (attr->ops && attr->ops->import)
 		return attr->ops->import(attr->device, host_addr,
-					 size, flags, dev_addr);
+					 size, fd, flags, dev_addr);
 
 	/*
 	 * Provider-managed import: register the host/MMIO region with the
@@ -70,7 +75,7 @@ static int xpu_import(struct efa_xpu_ctx *xctx, void *host_addr,
 	 * + cuMemHostGetDevicePointer for CUDA).
 	 */
 	return ofi_hmem_dev_import(attr->iface, attr->device, host_addr, size,
-				   flags, dev_addr);
+				   fd, flags, dev_addr);
 }
 
 /**
@@ -489,6 +494,7 @@ int efa_ep_export_xpu(struct fid_ep *ep, uint64_t flags,
 			ret = xpu_import(xctx, qp_sq_attr.buffer,
 					 (size_t) qp_sq_attr.num_entries *
 						 qp_sq_attr.entry_size,
+					 -1,
 					 FI_XPU_IMPORT_IOMEMORY |
 						 FI_XPU_IMPORT_DEVICEMAP,
 					 &sq_buf_dev);
@@ -511,7 +517,7 @@ int efa_ep_export_xpu(struct fid_ep *ep, uint64_t flags,
 			void *sq_db_dev = NULL;
 
 			ret = xpu_import(xctx, qp_sq_attr.doorbell,
-					 sizeof(uint32_t),
+					 sizeof(uint32_t), -1,
 					 FI_XPU_IMPORT_IOMEMORY |
 						 FI_XPU_IMPORT_DEVICEMAP,
 					 &sq_db_dev);
@@ -533,7 +539,8 @@ int efa_ep_export_xpu(struct fid_ep *ep, uint64_t flags,
 			ret = xpu_import(xctx, qp_rq_attr.buffer,
 					 (size_t) qp_rq_attr.num_entries *
 						 qp_rq_attr.entry_size,
-					 FI_XPU_IMPORT_DEVICEMAP, &rq_buf_dev);
+					 -1, FI_XPU_IMPORT_DEVICEMAP,
+					 &rq_buf_dev);
 			if (ret) {
 				EFA_WARN(FI_LOG_EP_CTRL,
 					 "map RQ buffer failed: %d\n", ret);
@@ -544,7 +551,7 @@ int efa_ep_export_xpu(struct fid_ep *ep, uint64_t flags,
 			h_ep.rq.buf = (uint8_t *) rq_buf_dev;
 
 			ret = xpu_import(xctx, qp_rq_attr.doorbell,
-					 sizeof(uint32_t),
+					 sizeof(uint32_t), -1,
 					 FI_XPU_IMPORT_IOMEMORY |
 						 FI_XPU_IMPORT_DEVICEMAP,
 					 &rq_db_dev);
