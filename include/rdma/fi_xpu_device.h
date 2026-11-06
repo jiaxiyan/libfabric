@@ -229,6 +229,10 @@ fi_xpu_wr_queue_tx(struct fid_xpu_ep *ep, const fi_wr wr,
 		   void *context, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_queue_tx(ep, wr, context, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
@@ -239,6 +243,10 @@ fi_xpu_wr_queue_recv(struct fid_xpu_ep *ep, const fi_wr wr,
 		     void *context, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_queue_recv(ep, wr, context, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
