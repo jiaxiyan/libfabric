@@ -158,4 +158,93 @@ efa_xpu_wr_prepare(void *ep, const struct fi_wr_attr *attr, void *wr,
 	return efa_xpu_group_leave(&g, ret);
 }
 
+/* A transmit descriptor, prepared for an operation this fabric carries. */
+FI_XPU_FUNC int
+efa_xpu_wr_is_tx(const struct efa_io_tx_wqe_128 *wqe)
+{
+	uint8_t op;
+
+	if (!(wqe->meta.ctrl1 & EFA_IO_TX_META_DESC_META_DESC_MASK))
+		return 0;
+
+	op = wqe->meta.ctrl1 & EFA_IO_TX_META_DESC_OP_TYPE_MASK;
+
+	return op == EFA_IO_SEND || op == EFA_IO_RDMA_READ ||
+	       op == EFA_IO_RDMA_WRITE;
+}
+
+FI_XPU_FUNC int
+efa_xpu_wr_queue_tx(void *ep, const void *wr, void *context, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_io_tx_wqe_128 wqe;
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr || !efa_xpu_wr_is_tx((const struct efa_io_tx_wqe_128 *) wr))
+		return -FI_EINVAL;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	wqe = *(const struct efa_io_tx_wqe_128 *) wr;
+
+	/* The context identifies this queueing of the request. */
+	efa_xpu_set_wrid(e, &wqe.meta, context);
+
+	ret = efa_xpu_post_wqe(e, &g, &wqe, FI_MORE);
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+FI_XPU_FUNC int
+efa_xpu_wr_queue_recv(void *ep, const void *wr, void *context, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	const struct efa_io_rx_desc *prepared = (const struct efa_io_rx_desc *) wr;
+	struct efa_xpu_group g;
+	int ret;
+
+	/*
+	 * The receive queue carries the slot as its request ID and has no room
+	 * for anything else, so there is nowhere to put a context here. A
+	 * device-side poll reports the slot, as it does for a receive posted
+	 * outright.
+	 */
+	(void) context;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr)
+		return -FI_EINVAL;
+
+	/* An endpoint whose queue pair has no receive queue has none to fill. */
+	if (!e->rq.db)
+		return -FI_EOPNOTSUPP;
+
+	/*
+	 * A request describing more than one segment needs as many consecutive
+	 * slots as it has segments, where a thread here claims one. Until a
+	 * claim can cover a run, only a request whose first segment is also
+	 * its last can be placed - which the host side can place either way,
+	 * so such a request is still worth preparing.
+	 */
+	if (!(prepared[0].lkey_ctrl & EFA_IO_RX_DESC_LAST_MASK))
+		return -FI_EOPNOTSUPP;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	/* Copied into the queue by the post, with the slot's request ID. */
+	ret = efa_xpu_post_rqe(e, &g, prepared, FI_MORE);
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
 #endif /* FI_XPU_DEVICE_EFA_WR_H */
