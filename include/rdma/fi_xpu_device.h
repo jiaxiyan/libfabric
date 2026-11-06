@@ -31,9 +31,15 @@
 #include <rdma/fi_xpu.h>
 #include <rdma/fi_trigger.h>
 
-typedef void *fi_wr;
-struct fi_wr_attr;
-struct fi_rma_iov;
+/*
+ * The work request calls below take a fi_wr_attr and a fi_rma_iov by value
+ * through a pointer, and a provider has to read their fields to format a
+ * descriptor, so the definitions are needed here rather than a forward
+ * declaration. fi_wr.h also declares fi_wr itself, so it is not redeclared:
+ * repeating the typedef is only valid from C11 onwards, and this header is
+ * compiled by whatever toolchain an application builds its kernels with.
+ */
+#include <rdma/fi_wr.h>
 
 /*
  * EFA device-side dispatch is only relevant on the CPU architectures
@@ -209,6 +215,10 @@ fi_xpu_wr_prepare(struct fid_xpu_ep *ep, const struct fi_wr_attr *attr,
 		  fi_wr wr, size_t *wr_len, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_prepare(ep, attr, wr, wr_len, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
