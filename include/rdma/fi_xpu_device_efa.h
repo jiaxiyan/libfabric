@@ -781,9 +781,10 @@ efa_xpu_post_next(struct efa_xpu_post *p)
  */
 FI_XPU_FUNC int
 efa_xpu_post_wqe(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
-		 struct efa_io_tx_wqe *wqe, uint64_t flags)
+		 struct efa_io_tx_wqe_128 *wqe, uint64_t flags)
 {
 	struct efa_xpu_post p;
+	uint32_t wqe_size = ep->sq.entry_size;
 
 	efa_xpu_post_begin(&p, &ep->sq, g, ep->local_cntr, ep->sq_size,
 			   &ep->submitted_count, flags);
@@ -805,17 +806,25 @@ efa_xpu_post_wqe(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
 			wqe->meta.ctrl2 |= EFA_IO_TX_META_DESC_PHASE_MASK;
 
 		/*
-		 * 64-byte write to the claimed SQ ring slot (BAR MMIO), as eight
-		 * 8-byte stores. The descriptor was filled in field by field, so
-		 * its bytes are gathered with memcpy rather than by reading the
-		 * struct through a uint64_t pointer: a compiler is entitled to
-		 * assume the two types never name the same memory and to drop
-		 * the field stores that such a read appears not to depend on.
+		 * Write the claimed SQ ring slot (BAR MMIO) as 8-byte stores.
+		 * The descriptor was filled in field by field, so its bytes are
+		 * gathered with memcpy rather than by reading the struct
+		 * through a uint64_t pointer: a compiler is entitled to assume
+		 * the two types never name the same memory and to drop the
+		 * field stores that such a read appears not to depend on.
+		 *
+		 * The stride and the length are the queue's negotiated entry
+		 * size, not sizeof(*wqe): a wide-WQE queue has 128-byte slots
+		 * and a narrow one 64-byte slots, and striding by the wrong one
+		 * puts every descriptor at the wrong offset. The descriptor is
+		 * always staged in the 128-byte layout, which is a superset of
+		 * the 64-byte one - every field this code writes lies at the
+		 * same offset in both - so one staging buffer serves either
+		 * queue and only the bytes the queue actually has are copied.
 		 */
-		sq_offset = (p.slot & ep->sq.queue_mask) *
-			    (uint32_t)sizeof(*wqe);
+		sq_offset = (p.slot & ep->sq.queue_mask) * wqe_size;
 		dst = (uint64_t *)(ep->sq.buf + sq_offset);
-		for (i = 0; i < sizeof(*wqe) / sizeof(*dst); i++) {
+		for (i = 0; i < wqe_size / sizeof(*dst); i++) {
 			uint64_t word;
 
 			memcpy(&word, (const uint8_t *)wqe + i * sizeof(word),
@@ -878,7 +887,7 @@ efa_xpu_post_rqe(struct efa_xpu_ep *ep, struct efa_xpu_group *g, void *buf,
 }
 
 FI_XPU_FUNC void
-efa_xpu_init_wqe(struct efa_io_tx_wqe *wqe,
+efa_xpu_init_wqe(struct efa_io_tx_wqe_128 *wqe,
 		    uint32_t op_type, struct efa_xpu_peer *peer)
 {
 	memset(wqe, 0, sizeof(*wqe));
@@ -951,7 +960,7 @@ efa_xpu_write(void *ep, const void *buf, size_t len, void *desc,
 	struct efa_xpu_desc *d = (struct efa_xpu_desc *)desc;
 	struct efa_xpu_peer *p = (struct efa_xpu_peer *)dest_addr;
 	struct efa_xpu_group g;
-	struct efa_io_tx_wqe wqe;
+	struct efa_io_tx_wqe_128 wqe;
 	int ret;
 
 	if (!efa_xpu_ep_compat(e))
@@ -991,7 +1000,7 @@ efa_xpu_read(void *ep, void *buf, size_t len, void *desc,
 	struct efa_xpu_desc *d = (struct efa_xpu_desc *)desc;
 	struct efa_xpu_peer *p = (struct efa_xpu_peer *)src_addr;
 	struct efa_xpu_group g;
-	struct efa_io_tx_wqe wqe;
+	struct efa_io_tx_wqe_128 wqe;
 	int ret;
 
 	if (!efa_xpu_ep_compat(e))
@@ -1023,7 +1032,7 @@ efa_xpu_send(void *ep, const void *buf, size_t len, void *desc,
 	struct efa_xpu_desc *d = (struct efa_xpu_desc *)desc;
 	struct efa_xpu_peer *p = (struct efa_xpu_peer *)dest_addr;
 	struct efa_xpu_group g;
-	struct efa_io_tx_wqe wqe;
+	struct efa_io_tx_wqe_128 wqe;
 	int ret;
 
 	if (!efa_xpu_ep_compat(e))
