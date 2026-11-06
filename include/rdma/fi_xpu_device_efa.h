@@ -21,6 +21,7 @@
 #include <string.h>
 #include <rdma/fi_xpu.h>
 #include <rdma/fi_eq.h>
+#include <rdma/fi_trigger.h>
 #include <rdma/efa_io_defs.h>
 
 /*
@@ -845,8 +846,8 @@ efa_xpu_post_wqe(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
  * ID, which carry the receive queue slot.
  */
 FI_XPU_FUNC int
-efa_xpu_post_rqe(struct efa_xpu_ep *ep, struct efa_xpu_group *g, void *buf,
-		 size_t len, uint32_t lkey, uint64_t flags)
+efa_xpu_post_rqe(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
+		 const struct efa_io_rx_desc *prepared, uint64_t flags)
 {
 	struct efa_xpu_post p;
 
@@ -861,14 +862,13 @@ efa_xpu_post_rqe(struct efa_xpu_ep *ep, struct efa_xpu_group *g, void *buf,
 		if (!p.active)
 			continue;
 
-		rqe.buf_addr_lo = (uint32_t)((uint64_t)(uintptr_t)buf &
-					     0xFFFFFFFF);
-		rqe.buf_addr_hi = (uint32_t)((uint64_t)(uintptr_t)buf >> 32);
+		/*
+		 * The descriptor arrives already formatted, so all this adds is
+		 * the request ID, which is the slot this thread ended up with
+		 * and so cannot be known any earlier.
+		 */
+		rqe = *prepared;
 		rqe.req_id = (uint16_t)p.slot;
-		rqe.length = (uint16_t)len;
-		rqe.lkey_ctrl = (lkey & EFA_IO_RX_DESC_LKEY_MASK) |
-				EFA_IO_RX_DESC_FIRST_MASK |
-				EFA_IO_RX_DESC_LAST_MASK;
 
 		/* Gathered with memcpy for the reason given in post_wqe(). */
 		rq_offset = (p.slot & ep->rq.queue_mask) *
@@ -949,6 +949,217 @@ efa_xpu_set_buf(struct efa_io_tx_buf_desc *d,
 }
 
 /*
+ * Descriptor formatting
+ *
+ * The hardware descriptor for an operation is the same whether a kernel issues
+ * the operation directly or prepares it now and queues it later, so both paths
+ * format it here. What these leave out is everything that is not known until a
+ * queue slot has been claimed - the slot's phase bit, and the request ID - and
+ * the completion context, which belongs to the call that queues the request
+ * rather than to the request itself.
+ *
+ * They take the operation in its iovec form, as the host side does, and the
+ * single-buffer entry points below wrap their arguments into a one-element
+ * iovec to reach them.
+ */
+FI_XPU_FUNC struct efa_xpu_peer *
+efa_xpu_peer_of(uint64_t addr)
+{
+	return (struct efa_xpu_peer *) (uintptr_t) addr;
+}
+
+FI_XPU_FUNC uint32_t
+efa_xpu_lkey_of(void **desc, size_t i)
+{
+	return ((struct efa_xpu_desc *) desc[i])->lkey;
+}
+
+/*
+ * Every segment is marked FIRST and only the last is marked LAST, which is the
+ * same thing efa_set_rx_buf() writes on the host.
+ */
+FI_XPU_FUNC void
+efa_xpu_set_rx_desc(struct efa_io_rx_desc *rqe, uint64_t addr, uint32_t lkey,
+		       size_t len, int is_last)
+{
+	rqe->buf_addr_lo = (uint32_t) (addr & 0xFFFFFFFF);
+	rqe->buf_addr_hi = (uint32_t) (addr >> 32);
+	rqe->req_id = 0;
+	rqe->length = (uint16_t) (len > 0xFFFF ? 0xFFFF : len);
+	rqe->lkey_ctrl = (lkey & EFA_IO_RX_DESC_LKEY_MASK) |
+			 EFA_IO_RX_DESC_FIRST_MASK |
+			 (is_last ? EFA_IO_RX_DESC_LAST_MASK : 0u);
+}
+
+/* Every segment needs a descriptor, so a missing one is an error, not a zero. */
+FI_XPU_FUNC int
+efa_xpu_check_desc(void **desc, size_t count)
+{
+	size_t i;
+
+	if (!desc)
+		return -FI_EINVAL;
+
+	for (i = 0; i < count; i++)
+		if (!desc[i])
+			return -FI_EINVAL;
+
+	return 0;
+}
+
+FI_XPU_FUNC int
+efa_xpu_format_send(struct efa_xpu_ep *e, const struct fi_op_msg *op,
+		     struct efa_io_tx_wqe_128 *wqe)
+{
+	const struct fi_msg *msg = &op->msg;
+	size_t i;
+	int ret;
+
+	/* The send descriptor carries at most two segments. */
+	if (!msg->iov_count || msg->iov_count > 2)
+		return -FI_EINVAL;
+
+	ret = efa_xpu_check_desc(msg->desc, msg->iov_count);
+	if (ret)
+		return ret;
+
+	efa_xpu_init_wqe(wqe, EFA_IO_SEND, efa_xpu_peer_of(msg->addr));
+
+	if (op->flags & FI_REMOTE_CQ_DATA) {
+		wqe->meta.ctrl1 |= EFA_IO_TX_META_DESC_HAS_IMM_MASK;
+		wqe->meta.immediate_data = (uint32_t) msg->data;
+	}
+
+	for (i = 0; i < msg->iov_count; i++)
+		efa_xpu_set_buf(&wqe->data.sgl[i],
+				efa_xpu_lkey_of(msg->desc, i),
+				(uint64_t) (uintptr_t) msg->msg_iov[i].iov_base,
+				(uint32_t) msg->msg_iov[i].iov_len);
+
+	wqe->meta.length = (uint16_t) msg->iov_count;
+	return 0;
+}
+
+FI_XPU_FUNC int
+efa_xpu_format_rma(struct efa_xpu_ep *e, const struct fi_op_rma *op,
+		    struct efa_io_tx_wqe_128 *wqe, uint32_t op_type)
+{
+	const struct fi_msg_rma *msg = &op->msg;
+	int ret;
+
+	/*
+	 * The RDMA descriptor holds one local and one remote segment, so a
+	 * transfer described by more than one of either cannot be expressed in
+	 * a single work request.
+	 */
+	if (msg->iov_count != 1 || msg->rma_iov_count != 1)
+		return -FI_EINVAL;
+
+	ret = efa_xpu_check_desc(msg->desc, 1);
+	if (ret)
+		return ret;
+
+	/* The two sides describe the same transfer, so they agree on length. */
+	if (msg->msg_iov[0].iov_len != msg->rma_iov[0].len)
+		return -FI_EINVAL;
+
+	efa_xpu_init_wqe(wqe, op_type, efa_xpu_peer_of(msg->addr));
+
+	if (op_type == EFA_IO_RDMA_WRITE && (op->flags & FI_REMOTE_CQ_DATA)) {
+		wqe->meta.ctrl1 |= EFA_IO_TX_META_DESC_HAS_IMM_MASK;
+		wqe->meta.immediate_data = (uint32_t) msg->data;
+	}
+
+	efa_xpu_set_remote(&wqe->data.rdma_req.remote_mem,
+			   (uint32_t) msg->rma_iov[0].key, msg->rma_iov[0].addr,
+			   (uint32_t) msg->rma_iov[0].len);
+	efa_xpu_set_buf(&wqe->data.rdma_req.local_mem[0],
+			efa_xpu_lkey_of(msg->desc, 0),
+			(uint64_t) (uintptr_t) msg->msg_iov[0].iov_base,
+			(uint32_t) msg->msg_iov[0].iov_len);
+
+	wqe->meta.length = 1;
+	return 0;
+}
+
+FI_XPU_FUNC int
+efa_xpu_format_recv(struct efa_xpu_ep *e, const struct fi_op_msg *op,
+		     struct efa_io_rx_desc *rqe)
+{
+	const struct fi_msg *msg = &op->msg;
+	size_t i;
+	int ret;
+
+	if (!msg->iov_count)
+		return -FI_EINVAL;
+
+	ret = efa_xpu_check_desc(msg->desc, msg->iov_count);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < msg->iov_count; i++)
+		efa_xpu_set_rx_desc(&rqe[i],
+				       (uint64_t) (uintptr_t)
+					       msg->msg_iov[i].iov_base,
+				       efa_xpu_lkey_of(msg->desc, i),
+				       msg->msg_iov[i].iov_len,
+				       i == msg->iov_count - 1);
+
+	return 0;
+}
+
+
+
+/*
+ * Wrap a single-buffer transfer into the iovec form the formatters take. The
+ * fields are assigned rather than initialised in place so that this header
+ * stays compilable by a pre-C99 toolchain, and so that nothing is left unset
+ * by accident. fi_op_*::ep is deliberately left NULL: the endpoint of a
+ * device-side operation is the handle the call was made on.
+ */
+FI_XPU_FUNC void
+efa_xpu_msg_op_init(struct fi_op_msg *op, struct iovec *iov, void **descs,
+		    void *buf, size_t len, void *desc, void *peer,
+		    uint64_t data, uint64_t flags)
+{
+	iov->iov_base = buf;
+	iov->iov_len = len;
+	descs[0] = desc;
+
+	memset(op, 0, sizeof(*op));
+	op->msg.msg_iov = iov;
+	op->msg.desc = descs;
+	op->msg.iov_count = 1;
+	op->msg.addr = (fi_addr_t) (uintptr_t) peer;
+	op->msg.data = data;
+	op->flags = flags;
+}
+
+FI_XPU_FUNC void
+efa_xpu_rma_op_init(struct fi_op_rma *op, struct iovec *iov, void **descs,
+		    struct fi_rma_iov *rma_iov, void *buf, size_t len,
+		    void *desc, void *peer, uint64_t addr, uint64_t key,
+		    uint64_t data, uint64_t flags)
+{
+	iov->iov_base = buf;
+	iov->iov_len = len;
+	descs[0] = desc;
+	rma_iov->addr = addr;
+	rma_iov->len = len;
+	rma_iov->key = key;
+
+	memset(op, 0, sizeof(*op));
+	op->msg.msg_iov = iov;
+	op->msg.desc = descs;
+	op->msg.iov_count = 1;
+	op->msg.addr = (fi_addr_t) (uintptr_t) peer;
+	op->msg.rma_iov = rma_iov;
+	op->msg.rma_iov_count = 1;
+	op->msg.data = data;
+	op->flags = flags;
+}
+
+/*
  * Device-side data transfer operations
  */
 FI_XPU_FUNC int
@@ -957,10 +1168,12 @@ efa_xpu_write(void *ep, const void *buf, size_t len, void *desc,
 		 uint64_t key, void *context, uint64_t flags, int scope)
 {
 	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
-	struct efa_xpu_desc *d = (struct efa_xpu_desc *)desc;
-	struct efa_xpu_peer *p = (struct efa_xpu_peer *)dest_addr;
 	struct efa_xpu_group g;
 	struct efa_io_tx_wqe_128 wqe;
+	struct iovec iov;
+	struct fi_rma_iov rma_iov;
+	struct fi_op_rma op;
+	void *descs[1];
 	int ret;
 
 	if (!efa_xpu_ep_compat(e))
@@ -971,22 +1184,21 @@ efa_xpu_write(void *ep, const void *buf, size_t len, void *desc,
 		return ret;
 
 	/*
-	 * Every thread of the group builds and posts its own descriptor; only
+	 * Every thread of the group formats and posts its own descriptor; only
 	 * the slot it lands in is agreed between them.
 	 */
-	efa_xpu_init_wqe(&wqe, EFA_IO_RDMA_WRITE, p);
-	efa_xpu_set_wrid(e, &wqe.meta, context);
-	if (flags & FI_REMOTE_CQ_DATA) {
-		wqe.meta.ctrl1 |= EFA_IO_TX_META_DESC_HAS_IMM_MASK;
-		wqe.meta.immediate_data = (uint32_t)data;
-	}
-	efa_xpu_set_remote(&wqe.data.rdma_req.remote_mem,
-			      (uint32_t)key, addr, (uint32_t)len);
-	efa_xpu_set_buf(&wqe.data.rdma_req.local_mem[0], d->lkey,
-			   (uint64_t)(uintptr_t)buf, (uint32_t)len);
-	wqe.meta.length = 1;
+	efa_xpu_rma_op_init(&op, &iov, descs, &rma_iov, (void *) buf, len, desc,
+			    dest_addr, addr, key, data, flags);
 
-	ret = efa_xpu_post_wqe(e, &g, &wqe, flags);
+	ret = efa_xpu_format_rma(e, &op, &wqe, EFA_IO_RDMA_WRITE);
+	if (!ret) {
+		/*
+		 * The context identifies this call rather than the descriptor,
+		 * so it goes in after the shared formatting.
+		 */
+		efa_xpu_set_wrid(e, &wqe.meta, context);
+		ret = efa_xpu_post_wqe(e, &g, &wqe, flags);
+	}
 
 	return efa_xpu_group_leave(&g, ret);
 }
@@ -997,10 +1209,12 @@ efa_xpu_read(void *ep, void *buf, size_t len, void *desc,
 		void *context, uint64_t flags, int scope)
 {
 	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
-	struct efa_xpu_desc *d = (struct efa_xpu_desc *)desc;
-	struct efa_xpu_peer *p = (struct efa_xpu_peer *)src_addr;
 	struct efa_xpu_group g;
 	struct efa_io_tx_wqe_128 wqe;
+	struct iovec iov;
+	struct fi_rma_iov rma_iov;
+	struct fi_op_rma op;
+	void *descs[1];
 	int ret;
 
 	if (!efa_xpu_ep_compat(e))
@@ -1010,15 +1224,14 @@ efa_xpu_read(void *ep, void *buf, size_t len, void *desc,
 	if (ret)
 		return ret;
 
-	efa_xpu_init_wqe(&wqe, EFA_IO_RDMA_READ, p);
-	efa_xpu_set_wrid(e, &wqe.meta, context);
-	efa_xpu_set_remote(&wqe.data.rdma_req.remote_mem,
-			      (uint32_t)key, addr, (uint32_t)len);
-	efa_xpu_set_buf(&wqe.data.rdma_req.local_mem[0], d->lkey,
-			   (uint64_t)(uintptr_t)buf, (uint32_t)len);
-	wqe.meta.length = 1;
+	efa_xpu_rma_op_init(&op, &iov, descs, &rma_iov, buf, len, desc,
+			    src_addr, addr, key, 0, flags);
 
-	ret = efa_xpu_post_wqe(e, &g, &wqe, flags);
+	ret = efa_xpu_format_rma(e, &op, &wqe, EFA_IO_RDMA_READ);
+	if (!ret) {
+		efa_xpu_set_wrid(e, &wqe.meta, context);
+		ret = efa_xpu_post_wqe(e, &g, &wqe, flags);
+	}
 
 	return efa_xpu_group_leave(&g, ret);
 }
@@ -1029,10 +1242,11 @@ efa_xpu_send(void *ep, const void *buf, size_t len, void *desc,
 		uint64_t flags, int scope)
 {
 	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
-	struct efa_xpu_desc *d = (struct efa_xpu_desc *)desc;
-	struct efa_xpu_peer *p = (struct efa_xpu_peer *)dest_addr;
 	struct efa_xpu_group g;
 	struct efa_io_tx_wqe_128 wqe;
+	struct iovec iov;
+	struct fi_op_msg op;
+	void *descs[1];
 	int ret;
 
 	if (!efa_xpu_ep_compat(e))
@@ -1042,17 +1256,14 @@ efa_xpu_send(void *ep, const void *buf, size_t len, void *desc,
 	if (ret)
 		return ret;
 
-	efa_xpu_init_wqe(&wqe, EFA_IO_SEND, p);
-	efa_xpu_set_wrid(e, &wqe.meta, context);
-	if (flags & FI_REMOTE_CQ_DATA) {
-		wqe.meta.ctrl1 |= EFA_IO_TX_META_DESC_HAS_IMM_MASK;
-		wqe.meta.immediate_data = (uint32_t)data;
-	}
-	efa_xpu_set_buf(&wqe.data.sgl[0], d->lkey,
-			   (uint64_t)(uintptr_t)buf, (uint32_t)len);
-	wqe.meta.length = 1;
+	efa_xpu_msg_op_init(&op, &iov, descs, (void *) buf, len, desc,
+			    dest_addr, data, flags);
 
-	ret = efa_xpu_post_wqe(e, &g, &wqe, flags);
+	ret = efa_xpu_format_send(e, &op, &wqe);
+	if (!ret) {
+		efa_xpu_set_wrid(e, &wqe.meta, context);
+		ret = efa_xpu_post_wqe(e, &g, &wqe, flags);
+	}
 
 	return efa_xpu_group_leave(&g, ret);
 }
@@ -1062,8 +1273,11 @@ efa_xpu_recv(void *ep, void *buf, size_t len, void *desc,
 		void *src_addr, void *context, uint64_t flags, int scope)
 {
 	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
-	struct efa_xpu_desc *d = (struct efa_xpu_desc *)desc;
 	struct efa_xpu_group g;
+	struct efa_io_rx_desc rqe;
+	struct iovec iov;
+	struct fi_op_msg op;
+	void *descs[1];
 	int ret;
 
 	(void)src_addr;
@@ -1077,7 +1291,11 @@ efa_xpu_recv(void *ep, void *buf, size_t len, void *desc,
 		return ret;
 
 	/* One receive descriptor per thread, as on the send queue. */
-	ret = efa_xpu_post_rqe(e, &g, buf, len, d->lkey, flags);
+	efa_xpu_msg_op_init(&op, &iov, descs, buf, len, desc, NULL, 0, flags);
+
+	ret = efa_xpu_format_recv(e, &op, &rqe);
+	if (!ret)
+		ret = efa_xpu_post_rqe(e, &g, &rqe, flags);
 
 	return efa_xpu_group_leave(&g, ret);
 }
