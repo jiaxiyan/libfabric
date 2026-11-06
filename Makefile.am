@@ -258,7 +258,8 @@ rdmainclude_HEADERS += \
 	$(top_srcdir)/include/rdma/fi_xpu.h \
 	$(top_srcdir)/include/rdma/fi_xpu_device.h \
 	$(top_srcdir)/include/rdma/fi_xpu_device_efa.h \
-	$(top_srcdir)/include/rdma/fi_xpu_device_efa_internal.h
+	$(top_srcdir)/include/rdma/fi_xpu_device_efa_internal.h \
+	$(top_srcdir)/include/rdma/fi_xpu_device_efa_wr.h
 providersinclude_HEADERS += \
 	$(top_srcdir)/include/rdma/providers/fi_log.h \
 	$(top_srcdir)/include/rdma/providers/fi_peer.h \

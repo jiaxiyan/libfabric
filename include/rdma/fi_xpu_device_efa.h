@@ -8,13 +8,14 @@
  * EFA Provider - XPU Device-Side Implementation
  *
  * The device-side operations fi_xpu_device.h dispatches to for EFA: the direct
- * data path, the completion queue and the counters. This is the provider's
- * single entry point, so anything else EFA splits its implementation into is
- * reached through here rather than by core including it too.
+ * data path, the completion queue and the counters. This is also the provider's
+ * single entry point, so it pulls in the work request calls as well - the one
+ * include core needs, whatever EFA splits its implementation into.
  */
 
 #include <rdma/fi_trigger.h>
 #include <rdma/fi_xpu_device_efa_internal.h>
+#include <rdma/fi_xpu_device_efa_wr.h>
 
 /*
  * This header is reached through fi_xpu_device.h, which defines FI_XPU_FUNC.
