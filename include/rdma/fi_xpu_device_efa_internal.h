@@ -176,6 +176,12 @@
  *   db_rung  the value last written to the doorbell, which bounds how many
  *            written-but-unrung descriptors may accumulate.
  *
+ * db_lock guards the doorbell rather than a slot range. Among posters the
+ * slot-order turn is enough: each holds a distinct range, so only one of them
+ * is ever eligible to ring. A flush holds no range and so holds no turn, and
+ * it still has to ring, which leaves the turn unable to order it against the
+ * posters. db_lock is what does.
+ *
  * init_phase is the phase bit the queue starts on; the bit for a given slot
  * follows from the slot number, so nothing has to track it.
  */
@@ -183,6 +189,7 @@ struct efa_xpu_wq {
 	uint32_t  pc;
 	uint32_t  released;
 	uint32_t  db_rung;
+	uint32_t  db_lock;
 	int32_t   init_phase;
 	uint32_t  queue_mask;
 	uint32_t  queue_size_shift;
@@ -532,29 +539,89 @@ efa_xpu_wq_batch(struct efa_xpu_wq *wq)
 /**
  * Ring the doorbell up to, but not including, slot @target.
  *
- * Only the thread holding the turn may call this. The descriptors in
- * [db_rung, target) were written by whichever posters held the turn before it,
- * each of which published its own before handing over.
+ * The descriptors in [db_rung, target) must already be written and published:
+ * they were written by whichever posters held the turn before this one, each
+ * of which published its own before handing over.
+ *
+ * The doorbell takes a producer index, so it must only ever move forwards;
+ * handing the device a smaller value than it already has retracts slots it was
+ * told about. Posters are ordered against each other by the turn, each holding
+ * a distinct slot range, but a flush holds no range and so holds no turn, so
+ * the register, @db_rung and @submitted_count are all updated under db_lock.
+ * @target is re-tested against db_rung inside it, because whoever held the lock
+ * first may already have rung this far, and counting that span twice would
+ * corrupt the drain accounting that reads submitted_count against the device's
+ * own counter.
  */
 FI_XPU_FUNC void
 efa_xpu_wq_ring(struct efa_xpu_wq *wq, uint64_t *submitted_count,
-		uint32_t db_rung, uint32_t target)
+		uint32_t target)
 {
+	uint32_t db_rung;
+
+	while (EFA_XPU_ATOMIC_CAS(&wq->db_lock, 0u, 1u) != 0u)
+		;
+
+	db_rung = EFA_XPU_LOAD(&wq->db_rung);
+
 	/*
-	 * The acquire half of the handoff. The descriptors about to be rung
-	 * were written by other threads, so this fence is not what publishes
-	 * them - it is what keeps the doorbell write below from being
-	 * reordered ahead of the read that observed the handoff.
+	 * Signed difference, because these cursors wrap: the question is
+	 * whether @target is ahead of what has been rung, not which of the two
+	 * is numerically larger.
 	 */
-	EFA_XPU_FENCE_SYSTEM();
+	if ((int32_t)(target - db_rung) > 0) {
+		/*
+		 * The acquire half of the handoff. The descriptors about to be
+		 * rung were written by other threads, so this fence is not what
+		 * publishes them - it is what keeps the doorbell write below
+		 * from being reordered ahead of the read that observed the
+		 * handoff.
+		 */
+		EFA_XPU_FENCE_SYSTEM();
 
-	*wq->db = target;
-	EFA_XPU_FENCE_SYSTEM();	/* order the doorbell MMIO write */
+		*wq->db = target;
+		EFA_XPU_FENCE_SYSTEM();	/* order the doorbell MMIO write */
 
-	if (submitted_count)
-		EFA_XPU_ATOMIC_ADD64(submitted_count,
-				     (uint64_t)(target - db_rung));
-	EFA_XPU_STORE(&wq->db_rung, target);
+		if (submitted_count)
+			EFA_XPU_ATOMIC_ADD64(submitted_count,
+					     (uint64_t)(target - db_rung));
+		EFA_XPU_STORE(&wq->db_rung, target);
+	}
+
+	EFA_XPU_ATOMIC_EXCH(&wq->db_lock, 0u);
+}
+
+/**
+ * Initiate the descriptors on @wq that a deferred post or a queued request
+ * left unrung.
+ *
+ * The target is the release cursor, not the reservation cursor: a descriptor
+ * below released was written and published by the poster that handed it off,
+ * so the device may be told about it, while a slot in [released, pc) is claimed
+ * by a poster that may still be writing it, and announcing that would hand the
+ * device a descriptor which does not exist yet. The host side rings to its
+ * production cursor instead, but there a lock means the cursor only moves once
+ * the descriptor is in.
+ *
+ * That is also all the man page asks for: fi_tx_flush covers what the provider
+ * has queued on "the endpoint's transmit queue", not what the calling thread
+ * queued, so the cursor the queue already publishes is the right target rather
+ * than anything a caller would have to remember.
+ */
+FI_XPU_FUNC int
+efa_xpu_wq_flush(struct efa_xpu_wq *wq, uint64_t *submitted_count)
+{
+	uint32_t target = EFA_XPU_LOAD(&wq->released);
+
+	/*
+	 * Nothing deferred: skip the lock rather than take it to find that out.
+	 * efa_xpu_wq_ring() re-tests this anyway, so a post that defers between
+	 * the two reads is simply picked up by whoever rings next.
+	 */
+	if (EFA_XPU_LOAD(&wq->db_rung) != target)
+		efa_xpu_wq_ring(wq, submitted_count, target);
+
+	return 0;
 }
 
 /**
@@ -581,13 +648,9 @@ efa_xpu_wq_wait_room(struct efa_xpu_wq *wq, uint32_t base, uint32_t count,
 	 * it has already been written into.
 	 */
 	while ((next - EFA_XPU_LOAD(&wq->db_rung)) > max_batch) {
-		if (EFA_XPU_LOAD(&wq->released) == base) {
-			uint32_t db_rung = EFA_XPU_LOAD(&wq->db_rung);
-
-			if (db_rung != base)
-				efa_xpu_wq_ring(wq, submitted_count, db_rung,
-						base);
-		}
+		if (EFA_XPU_LOAD(&wq->released) == base &&
+		    EFA_XPU_LOAD(&wq->db_rung) != base)
+			efa_xpu_wq_ring(wq, submitted_count, base);
 	}
 
 	/*
@@ -630,7 +693,7 @@ efa_xpu_wq_handoff(struct efa_xpu_wq *wq, uint32_t base, uint32_t count,
 	 * drains the whole batch.
 	 */
 	if (!defer || (next - db_rung) >= efa_xpu_wq_batch(wq))
-		efa_xpu_wq_ring(wq, submitted_count, db_rung, next);
+		efa_xpu_wq_ring(wq, submitted_count, next);
 
 	EFA_XPU_STORE(&wq->released, next);
 }
