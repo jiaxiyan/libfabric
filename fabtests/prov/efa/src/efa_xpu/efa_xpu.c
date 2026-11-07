@@ -89,6 +89,9 @@ static bool use_cntr;
  * by a warp at FI_XPU_SUBGROUP or by the whole block at FI_XPU_WORK_GROUP.
  */
 static int gda_scope = FI_XPU_WORK_ITEM;
+static void *dev_wr_buf;
+static int gda_use_wr;
+static size_t wr_tx_stride, wr_rx_stride;
 static int gda_threads = 1;
 
 /*
@@ -108,6 +111,7 @@ enum {
 	LONG_OPT_SCOPE,
 	LONG_OPT_THREADS,
 	LONG_OPT_LAT,
+	LONG_OPT_XPU_USE_WR,
 };
 
 #define XPU_LOG(fmt, ...)						\
@@ -140,6 +144,35 @@ static int create_xpu_ctx(void)
 
 	av_addr_size = xpu_ctx_attr.av_addr_size;
 	mr_desc_size = xpu_ctx_attr.mr_desc_size;
+
+	if (gda_use_wr) {
+		if (!(xpu_ctx_attr.caps & FI_XPU_CAP_WR)) {
+			FT_ERR("--use-wr given but the provider does not report FI_XPU_CAP_WR");
+			return -FI_EOPNOTSUPP;
+		}
+		/*
+		 * fi_xpu_ctx_attr carries the device request sizes from API
+		 * 2.8 on. Until the library's own version reaches it the
+		 * provider cannot fill them in - an older caller passed a
+		 * structure with no room - so fall back to the endpoint's
+		 * host request sizes, which for this provider are the same
+		 * numbers: a descriptor built on the device has the layout
+		 * fi_wr_prepare() builds.
+		 */
+		wr_tx_stride = xpu_ctx_attr.max_tx_wr_desc_size;
+		wr_rx_stride = xpu_ctx_attr.max_rx_wr_desc_size;
+		if (!wr_tx_stride)
+			wr_tx_stride = fi->ep_attr->max_tx_wr_size;
+		if (!wr_rx_stride)
+			wr_rx_stride = fi->ep_attr->max_rx_wr_size;
+		if (!wr_tx_stride || !wr_rx_stride) {
+			FT_ERR("no work request size available (tx=%zu rx=%zu)",
+			       wr_tx_stride, wr_rx_stride);
+			return -FI_EOPNOTSUPP;
+		}
+		XPU_LOG("  max_tx_wr_desc_size=%zu max_rx_wr_desc_size=%zu",
+			wr_tx_stride, wr_rx_stride);
+	}
 
 	FT_DEBUG("XPU ctx caps=0x%lx av_addr_size=%zu mr_desc_size=%zu\n",
 		 xpu_ctx_attr.caps, av_addr_size, mr_desc_size);
@@ -300,6 +333,24 @@ static int export_mr_desc(void)
 		FT_PRINTERR("fi_mr_get_xpu_desc", -ret);
 		free(desc_buf);
 		return ret;
+	}
+
+	if (gda_use_wr) {
+		/*
+		 * One request per thread: fi_xpu_wr_prepare formats in place,
+		 * so threads cannot share a buffer.
+		 */
+		size_t stride = wr_tx_stride > wr_rx_stride ?
+				wr_tx_stride : wr_rx_stride;
+
+		if (ft_cuda_alloc(opts.device, &dev_wr_buf,
+				  stride * gda_threads) != FI_SUCCESS) {
+			FT_ERR("cudaMalloc for work requests failed\n");
+			return -FI_ENOMEM;
+		}
+		wr_tx_stride = wr_rx_stride = stride;
+		XPU_LOG("  dev_wr_buf=%p stride=%zu threads=%d",
+			dev_wr_buf, stride, gda_threads);
 	}
 
 	if (ft_cuda_alloc(opts.device, &dev_mr_desc, mr_desc_size) != FI_SUCCESS) {
@@ -676,6 +727,7 @@ static int run_bw(void)
 			dev_av_addr, av_addr_size,
 			remote_iov.addr, remote_iov.key,
 			opts.iterations, tx_depth, gda_scope, gda_threads,
+			gda_use_wr, dev_wr_buf, wr_tx_stride,
 			stream);
 
 		/*
@@ -724,7 +776,8 @@ static int run_bw(void)
 				rx_buf, opts.transfer_size,
 				dev_mr_desc, mr_desc_size,
 				opts.iterations, rx_depth, gda_scope,
-				gda_threads, stream);
+				gda_threads, gda_use_wr, dev_wr_buf,
+				wr_rx_stride, stream);
 		} else {
 			/* Plain write / read: server just waits. */
 			struct fi_rma_iov remote_iov = {0};
@@ -799,6 +852,8 @@ int main(int argc, char **argv)
 				{"threads", required_argument, NULL,
 				 LONG_OPT_THREADS},
 				{"lat", no_argument, NULL, LONG_OPT_LAT},
+				{"use-wr", no_argument, NULL,
+				 LONG_OPT_XPU_USE_WR},
 				{0, 0, 0, 0}
 			    }, NULL)) != -1) {
 		switch (op) {
@@ -821,6 +876,16 @@ int main(int argc, char **argv)
 			break;
 		case LONG_OPT_THREADS:
 			gda_threads = atoi(optarg);
+			break;
+		case LONG_OPT_XPU_USE_WR:
+			/*
+			 * Not opts.use_wr_api: that is the shared harness's
+			 * host-side flag, which asks for FI_WR in the hints
+			 * and routes its own posts through the host work
+			 * request calls. Neither applies to a kernel issuing
+			 * its own.
+			 */
+			gda_use_wr = 1;
 			break;
 		case LONG_OPT_LAT:
 			run_latency = true;
@@ -956,7 +1021,7 @@ int main(int argc, char **argv)
 	 * version max_cntr_value stays UINT64_MAX and hw counter creation is
 	 * rejected with -FI_EOPNOTSUPP.
 	 */
-	ft_fiversion = FI_VERSION(2, 6);
+	ft_fiversion = FI_VERSION(2, 7);
 
 	XPU_LOG("step 1: ft_init + ft_init_oob");
 	ret = ft_init();
@@ -1079,12 +1144,20 @@ int main(int argc, char **argv)
 		FT_PRINTERR("fi_ep_bind(av)", -ret);
 		goto out;
 	}
-	ret = fi_ep_bind(ep, &txcq->fid, FI_TRANSMIT | FI_SELECTIVE_COMPLETION);
+	/*
+	 * No FI_SELECTIVE_COMPLETION: a descriptor the device builds always
+	 * asks for a completion - efa_xpu_init_wqe() sets COMP_REQ and nothing
+	 * clears it - and there is no per-operation FI_COMPLETION on the
+	 * device calls to select with, so the endpoint cannot honour it.
+	 * Asking for it only ties the test to FI_CONTEXT2, which is what
+	 * efa-direct implements the suppression with.
+	 */
+	ret = fi_ep_bind(ep, &txcq->fid, FI_TRANSMIT);
 	if (ret) {
 		FT_PRINTERR("fi_ep_bind(txcq)", -ret);
 		goto out;
 	}
-	ret = fi_ep_bind(ep, &rxcq->fid, FI_RECV | FI_SELECTIVE_COMPLETION);
+	ret = fi_ep_bind(ep, &rxcq->fid, FI_RECV);
 	if (ret) {
 		FT_PRINTERR("fi_ep_bind(rxcq)", -ret);
 		goto out;

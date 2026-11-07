@@ -281,6 +281,98 @@ int ft_efa_xpu_run_lat_send(struct fid_xpu_ep *xpu_ep,
 	return 0;
 }
 
+
+/*
+ * Work request helpers
+ *
+ * These format a request once, so the inner loop only queues it and flushes.
+ * The addressing is the device's own form, as it is for the direct calls
+ * beside them: the peer is the bytes fi_av_lookup2() returned and each
+ * descriptor the bytes fi_mr_get_xpu_desc() returned, not an fi_addr_t and a
+ * host memory region, neither of which a kernel can resolve.
+ */
+__device__ static int ft_efa_xpu_prep_tx(struct fid_xpu_ep *ep, int opcode,
+					 void *buf, size_t len, void *desc,
+					 void *peer, uint64_t raddr,
+					 uint64_t rkey, void *wr,
+					 size_t *wr_len, int scope)
+{
+	struct iovec iov;
+	void *descs[1];
+	struct fi_wr_attr attr;
+
+	iov.iov_base = buf;
+	iov.iov_len = len;
+	descs[0] = desc;
+
+	if (opcode == 0) {
+		struct fi_msg msg;
+		struct fi_op_msg op;
+
+		memset(&msg, 0, sizeof(msg));
+		memset(&op, 0, sizeof(op));
+		msg.msg_iov = &iov;
+		msg.desc = descs;
+		msg.iov_count = 1;
+		msg.addr = (fi_addr_t) (uintptr_t) peer;
+		op.msg = msg;
+		attr.op_type = FI_OP_SEND;
+		attr.op.msg = &op;
+
+		return fi_xpu_wr_prepare(ep, &attr, wr, wr_len, scope);
+	} else {
+		struct fi_rma_iov rma_iov;
+		struct fi_msg_rma msg;
+		struct fi_op_rma op;
+
+		memset(&msg, 0, sizeof(msg));
+		memset(&op, 0, sizeof(op));
+		rma_iov.addr = raddr;
+		rma_iov.len = len;
+		rma_iov.key = rkey;
+		msg.msg_iov = &iov;
+		msg.desc = descs;
+		msg.iov_count = 1;
+		msg.addr = (fi_addr_t) (uintptr_t) peer;
+		msg.rma_iov = &rma_iov;
+		msg.rma_iov_count = 1;
+		/* writedata carries immediate data; plain write and read do not. */
+		msg.data = (opcode == 2) ? 0x12345678 : 0;
+		op.msg = msg;
+		op.flags = (opcode == 2) ? FI_REMOTE_CQ_DATA : 0;
+		attr.op_type = (opcode == 3) ? FI_OP_READ : FI_OP_WRITE;
+		attr.op.rma = &op;
+
+		return fi_xpu_wr_prepare(ep, &attr, wr, wr_len, scope);
+	}
+}
+
+__device__ static int ft_efa_xpu_prep_rx(struct fid_xpu_ep *ep, void *buf,
+					 size_t len, void *desc, void *wr,
+					 size_t *wr_len, int scope)
+{
+	struct iovec iov;
+	void *descs[1];
+	struct fi_msg msg;
+	struct fi_op_msg op;
+	struct fi_wr_attr attr;
+
+	iov.iov_base = buf;
+	iov.iov_len = len;
+	descs[0] = desc;
+
+	memset(&msg, 0, sizeof(msg));
+	memset(&op, 0, sizeof(op));
+	msg.msg_iov = &iov;
+	msg.desc = descs;
+	msg.iov_count = 1;
+	op.msg = msg;
+	attr.op_type = FI_OP_RECV;
+	attr.op.msg = &op;
+
+	return fi_xpu_wr_prepare(ep, &attr, wr, wr_len, scope);
+}
+
 __global__ void ft_efa_xpu_bw_tx_kernel(
 	struct fid_xpu_ep *xpu_ep,
 	struct fid_xpu_cq *xpu_send_cq,
@@ -290,9 +382,13 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 	void *send_desc, size_t send_desc_size,
 	void *dest_addr, size_t dest_addr_size,
 	uint64_t remote_addr, uint64_t remote_key,
-	int iters, int tx_depth, int scope)
+	int iters, int tx_depth, int scope,
+	int use_wr, void *wr_buf, size_t wr_stride)
 {
 	int gsize = ft_efa_xpu_group_size(scope);
+	/* A request is formatted in place, so every thread needs its own. */
+	void *my_wr = (char *) wr_buf + threadIdx.x * wr_stride;
+	size_t wr_len = wr_stride;
 	int group_ops, group_depth;
 	/* Operations the group has posted and completed, not calls it has made. */
 	int scnt = 0;
@@ -314,9 +410,26 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 			__syncthreads();
 	}
 
+	if (use_wr) {
+		ret = ft_efa_xpu_prep_tx(xpu_ep, opcode, send_buf, send_len,
+					 send_desc, dest_addr, remote_addr,
+					 remote_key, my_wr, &wr_len, scope);
+		if (ret) {
+			printf("ft_efa_xpu_bw: wr_prepare failed: %d\n", ret);
+			return;
+		}
+	}
+
 	while (scnt < group_ops || ccnt < group_ops) {
 		/* Post operations up to this group's share of tx_depth */
 		while (scnt < group_ops && (scnt - ccnt) < group_depth) {
+		    if (use_wr) {
+			/*
+			 * Queueing does not initiate; the flush below starts
+			 * the whole batch at once.
+			 */
+			ret = fi_xpu_wr_queue_tx(xpu_ep, my_wr, NULL, scope);
+		    } else {
 			switch (opcode) {
 			case 1: /* write */
 				ret = fi_xpu_write(xpu_ep, send_buf, send_len,
@@ -343,12 +456,21 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 						  NULL, 0, scope);
 				break;
 			}
+		    }
 			if (ret) {
 				printf("ft_efa_xpu_bw: post failed: %d at scnt=%d\n",
 				       ret, scnt);
 				return;
 			}
 			scnt += gsize;
+		}
+
+		if (use_wr) {
+			ret = fi_xpu_tx_flush(xpu_ep, 0, scope);
+			if (ret) {
+				printf("ft_efa_xpu_bw: tx_flush failed: %d\n", ret);
+				return;
+			}
 		}
 
 		/*
@@ -405,6 +527,7 @@ int ft_efa_xpu_run_bw(struct fid_xpu_ep *xpu_ep,
 		  void *dest_addr, size_t dest_addr_size,
 		  uint64_t remote_addr, uint64_t remote_key,
 		  int iters, int tx_depth, int scope, int threads,
+		  int use_wr, void *wr_buf, size_t wr_stride,
 		  cudaStream_t stream)
 {
 	cudaError_t err;
@@ -414,7 +537,7 @@ int ft_efa_xpu_run_bw(struct fid_xpu_ep *xpu_ep,
 		send_buf, send_len, send_desc, send_desc_size,
 		dest_addr, dest_addr_size,
 		remote_addr, remote_key,
-		iters, tx_depth, scope);
+		iters, tx_depth, scope, use_wr, wr_buf, wr_stride);
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -439,10 +562,14 @@ __global__ void ft_efa_xpu_bw_rx_kernel(
 	struct fid_xpu_cntr *xpu_recv_cntr,
 	void *recv_buf, size_t recv_len,
 	void *recv_desc, size_t recv_desc_size,
-	int iters, int rx_depth, int scope)
+	int iters, int rx_depth, int scope,
+	int use_wr, void *wr_buf, size_t wr_stride)
 {
 	int gsize = ft_efa_xpu_group_size(scope);
 	int group_ops, group_depth;
+	/* A request is formatted in place, so every thread needs its own. */
+	void *my_wr = (char *) wr_buf + threadIdx.x * wr_stride;
+	size_t wr_len = wr_stride;
 	/* Operations the group has received, not calls it has made. */
 	int rcnt = 0;
 	int ret;
@@ -462,17 +589,38 @@ __global__ void ft_efa_xpu_bw_rx_kernel(
 			__syncthreads();
 	}
 
+	if (use_wr) {
+		ret = ft_efa_xpu_prep_rx(xpu_ep, recv_buf, recv_len, recv_desc,
+					 my_wr, &wr_len, scope);
+		if (ret) {
+			printf("ft_efa_xpu_bw_recv: wr_prepare failed: %d\n", ret);
+			return;
+		}
+	}
+
 	/*
-	 * Post initial receives batched: defer the RQ doorbell with FI_MORE
-	 * on all but the last post, which rings it for the whole batch.
+	 * Post initial receives batched. With work requests the queueing
+	 * defers on its own and one flush starts the batch; otherwise FI_MORE
+	 * defers all but the last post, which rings the doorbell for all.
 	 */
 	for (int i = 0; i < group_depth; i += gsize) {
 		uint64_t rflags = (i + gsize < group_depth) ? FI_MORE : 0;
 
-		ret = fi_xpu_recv(xpu_ep, recv_buf, recv_len, recv_desc,
-				  NULL, NULL, rflags, scope);
+		if (use_wr)
+			ret = fi_xpu_wr_queue_recv(xpu_ep, my_wr, NULL, scope);
+		else
+			ret = fi_xpu_recv(xpu_ep, recv_buf, recv_len, recv_desc,
+					  NULL, NULL, rflags, scope);
 		if (ret) {
 			printf("ft_efa_xpu_bw_recv: post failed: %d\n", ret);
+			return;
+		}
+	}
+
+	if (use_wr) {
+		ret = fi_xpu_recv_flush(xpu_ep, 0, scope);
+		if (ret) {
+			printf("ft_efa_xpu_bw_recv: recv_flush failed: %d\n", ret);
 			return;
 		}
 	}
@@ -496,8 +644,17 @@ __global__ void ft_efa_xpu_bw_rx_kernel(
 
 		/* Repost receive */
 		if (rcnt + group_depth <= group_ops) {
-			ret = fi_xpu_recv(xpu_ep, recv_buf, recv_len,
-					  recv_desc, NULL, NULL, 0, scope);
+			if (use_wr) {
+				ret = fi_xpu_wr_queue_recv(xpu_ep, my_wr, NULL,
+							   scope);
+				if (!ret)
+					ret = fi_xpu_recv_flush(xpu_ep, 0,
+								scope);
+			} else {
+				ret = fi_xpu_recv(xpu_ep, recv_buf, recv_len,
+						  recv_desc, NULL, NULL, 0,
+						  scope);
+			}
 			if (ret) {
 				printf("ft_efa_xpu_bw_recv: repost failed: %d\n", ret);
 				return;
@@ -517,6 +674,7 @@ int ft_efa_xpu_run_bw_recv(struct fid_xpu_ep *xpu_ep,
 		       void *recv_buf, size_t recv_len,
 		       void *recv_desc, size_t recv_desc_size,
 		       int iters, int rx_depth, int scope, int threads,
+		       int use_wr, void *wr_buf, size_t wr_stride,
 		       cudaStream_t stream)
 {
 	cudaError_t err;
@@ -524,7 +682,7 @@ int ft_efa_xpu_run_bw_recv(struct fid_xpu_ep *xpu_ep,
 	ft_efa_xpu_bw_rx_kernel<<<1, threads, 0, stream>>>(
 		xpu_ep, xpu_recv_cq, xpu_recv_cntr,
 		recv_buf, recv_len, recv_desc, recv_desc_size,
-		iters, rx_depth, scope);
+		iters, rx_depth, scope, use_wr, wr_buf, wr_stride);
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {

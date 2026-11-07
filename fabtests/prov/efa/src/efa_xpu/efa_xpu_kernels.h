@@ -98,6 +98,11 @@ int ft_efa_xpu_run_lat_send(struct fid_xpu_ep *xpu_ep,
  * @tx_depth:     Transmit queue depth
  * @scope:        Cooperative scope the operations are issued at
  * @threads:      Threads in the block, split between the issuers of @scope
+ * @use_wr:       Format the transfer once and queue it, rather than posting
+ *                it outright: exercises fi_xpu_wr_prepare, fi_xpu_wr_queue_tx
+ *                and fi_xpu_tx_flush
+ * @wr_buf:       Device memory for the prepared requests, @threads * @wr_stride
+ * @wr_stride:    Bytes per thread in @wr_buf (fi_xpu_ctx_attr::max_tx_wr_desc_size)
  * @stream:       CUDA stream for kernel launch
  *
  * Returns 0 on success, negative on failure.
@@ -111,6 +116,7 @@ int ft_efa_xpu_run_bw(struct fid_xpu_ep *xpu_ep,
 		  void *dest_addr, size_t dest_addr_size,
 		  uint64_t remote_addr, uint64_t remote_key,
 		  int iters, int tx_depth, int scope, int threads,
+		  int use_wr, void *wr_buf, size_t wr_stride,
 		  cudaStream_t stream);
 
 /**
@@ -137,6 +143,7 @@ int ft_efa_xpu_run_bw_recv(struct fid_xpu_ep *xpu_ep,
 		       void *recv_buf, size_t recv_len,
 		       void *recv_desc, size_t recv_desc_size,
 		       int iters, int rx_depth, int scope, int threads,
+		       int use_wr, void *wr_buf, size_t wr_stride,
 		       cudaStream_t stream);
 
 /**
