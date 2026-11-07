@@ -11,6 +11,7 @@
 #include "efa_cntr.h"
 #include "efa_av.h"
 #include "efa_mr.h"
+#include "efa_wr.h"
 #include "efa_xpu.h"
 
 #include <rdma/fi_xpu_device_efa.h>
@@ -179,12 +180,38 @@ void efa_xpu_mem_put_fd(struct fid_xpu_ctx *ctx, int fd)
  * XPU Context (fid_xpu_ctx) management
  * ---------------------------------------------------------------- */
 
-static int efa_xpu_ctx_query(struct fid_xpu_ctx *ctx,
+static int efa_xpu_ctx_query(struct fid_xpu_ctx *ctx_fid,
 			     struct fi_xpu_ctx_attr *attr)
 {
-	attr->caps = FI_XPU_CAP_EP | FI_XPU_CAP_CQ | FI_XPU_CAP_CNTR;
+	struct efa_xpu_ctx *xctx;
+	struct efa_domain *efa_domain;
+	uint32_t api_version;
+
+	xctx = container_of(ctx_fid, struct efa_xpu_ctx, ctx);
+	efa_domain = container_of(xctx->domain, struct efa_domain,
+				  util_domain.domain_fid);
+	api_version = efa_domain->util_domain.fabric->fabric_fid.api_version;
+
+	attr->caps = FI_XPU_CAP_EP | FI_XPU_CAP_CQ | FI_XPU_CAP_CNTR |
+		     FI_XPU_CAP_WR;
 	attr->av_addr_size = sizeof(struct efa_xpu_peer);
 	attr->mr_desc_size = sizeof(struct efa_xpu_desc);
+
+	/*
+	 * The work request sizes were added in 2.8. An application that asked
+	 * for anything earlier passed the structure as it was then, which has
+	 * no room for them, so writing them would run off the end of it.
+	 *
+	 * A descriptor built on the device has the same layout as one
+	 * fi_wr_prepare() builds, which is what lets a request prepared on
+	 * either side be queued from the other, so the sizes are the host's.
+	 */
+	if (FI_VERSION_GE(api_version, FI_VERSION(2, 8))) {
+		attr->max_tx_wr_desc_size = efa_wr_tx_size();
+		attr->max_rx_wr_desc_size =
+			efa_wr_rx_size(efa_domain->device->efa_attr.max_rq_sge);
+	}
+
 	return 0;
 }
 
