@@ -155,6 +155,18 @@ The following features are supported:
     *FI_EFA_TRACK_MR* are unavailable. When hints are NULL or advertise
     *FI_CONTEXT2*, the returned `fi_info` includes the mode.
 
+  Requesting *FI_WR* selects operation without a context buffer, whether or
+  not *FI_CONTEXT2* is advertised in hints: a work request is an opaque
+  hardware descriptor with no room for the context the mode would have the
+  provider fill in, so the two are mutually exclusive and the returned
+  `fi_info` drops whichever the application did not ask for. Everything the
+  mode carries is therefore unavailable alongside *FI_WR*, and
+  *FI_SELECTIVE_COMPLETION* in particular: binding a completion queue with it
+  to an endpoint that requested *FI_WR* fails with *-FI_EOPNOTSUPP*. An
+  application that needs both has to choose, and one that needs neither should
+  leave *FI_SELECTIVE_COMPLETION* off the `fi_ep_bind` flags rather than
+  discover the conflict there.
+
   The `efa` fabric of an RDM endpoint does not use *FI_CONTEXT2*.
 
 *Memory registration modes*
