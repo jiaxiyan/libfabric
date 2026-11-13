@@ -1351,11 +1351,7 @@ __global__ void ft_efa_xpu_scope_reject_kernel(
 			fails++;
 		}
 
-		/*
-		 * A request the queue calls will look at before the scope:
-		 * each checks which queue a request belongs to first, so an
-		 * empty one would be refused for that instead.
-		 */
+		/* A real request, so the scope is what refuses the queueing. */
 		if (!fi_xpu_wr_prepare(xpu_ep, &attr, &wr, &wr_len,
 				       FI_XPU_WORK_ITEM)) {
 			ret = fi_xpu_wr_queue_tx(xpu_ep, &wr, NULL, scope);

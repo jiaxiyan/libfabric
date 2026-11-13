@@ -59,21 +59,13 @@ efa_xpu_wr_rx_size(size_t num_sge)
 
 /*
  * A work request carries no tag of its own saying which queue it belongs to,
- * and queueing a receive descriptor on the send queue would hand the device
- * sixteen bytes of nonsense. The meta descriptor bit every send queue entry
- * sets, and no receive descriptor does, is what tells them apart: a receive
- * descriptor's first four bytes are the low half of a buffer address, so the
- * bit is clear there unless the buffer happens to be so aligned - which it
- * cannot be, since the bit lies in the low byte and a registered buffer is at
- * least two-byte aligned.
+ * and there is nothing in a descriptor that could stand in for one: the meta
+ * descriptor bit every send queue entry sets lands on bit 7 of a receive
+ * descriptor's buffer address, which is set for about half of all buffers. So
+ * each queue call reads the request as the kind of descriptor its own queue
+ * takes, as the host's queue calls do, and queueing a request on the wrong
+ * queue is the caller's error to avoid rather than the provider's to catch.
  */
-FI_XPU_FUNC int
-efa_xpu_wr_is_tx(const void *wr)
-{
-	const struct efa_io_tx_wqe_128 *wqe = (const struct efa_io_tx_wqe_128 *) wr;
-
-	return !!(wqe->meta.ctrl1 & EFA_IO_TX_META_DESC_META_DESC_MASK);
-}
 
 /*
  * Format a send or an RMA request into @wqe.
@@ -302,9 +294,6 @@ efa_xpu_wr_queue_tx(void *ep, const void *wr, void *context, int scope)
 	if (!wr)
 		return -FI_EINVAL;
 
-	if (!efa_xpu_wr_is_tx(wr))
-		return -FI_EINVAL;
-
 	ret = efa_xpu_group_enter(&g, scope);
 	if (ret)
 		return ret;
@@ -354,9 +343,6 @@ efa_xpu_wr_queue_recv(void *ep, const void *wr, void *context, int scope)
 	/* An endpoint whose queue pair has no receive queue has none to fill. */
 	if (!e->rq.db)
 		return -FI_EOPNOTSUPP;
-
-	if (efa_xpu_wr_is_tx(wr))
-		return -FI_EINVAL;
 
 	/*
 	 * A request describing more than one segment needs as many consecutive
@@ -446,6 +432,329 @@ efa_xpu_recv_flush(void *ep, uint64_t flags, int scope)
 
 	if (g.leader)
 		ret = efa_xpu_wq_flush(&e->rq);
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+/*
+ * Modifying a prepared request.
+ *
+ * A kernel whose operation differs from one iteration to the next in one field
+ * can change that field rather than format the request again - a different
+ * peer, a different chunk of the same buffer, a different remote offset. What
+ * each call may change follows the descriptor: a field the request was not
+ * prepared to carry cannot be added, because there is nowhere in the
+ * descriptor to put it.
+ *
+ * Unlike the queue calls these write to the request, so a request being
+ * modified is not one another thread may queue. That is the caller's to
+ * arrange, and it is why a kernel that wants per-iteration variety usually
+ * does better with a request per issuer, modified by its own issuer alone.
+ *
+ * @op_type says what the request was prepared as; the request does not record
+ * it, and the descriptor a send and an RMA write keep their buffers in is not
+ * the same.
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_op_is_tx(enum fi_op_type op_type)
+{
+	return op_type == FI_OP_SEND || op_type == FI_OP_READ ||
+	       op_type == FI_OP_WRITE;
+}
+
+/*
+ * The buffer descriptor a transmit request keeps its local buffer in: a send
+ * holds it in the top level sgl, an RMA request in the rdma_req beside the
+ * remote address.
+ */
+FI_XPU_FUNC struct efa_io_tx_buf_desc *
+efa_xpu_wr_local_buf(struct efa_io_tx_wqe_128 *wqe, enum fi_op_type op_type)
+{
+	if (op_type == FI_OP_SEND)
+		return &wqe->data.sgl[0];
+
+	return &wqe->data.rdma_req.local_mem[0];
+}
+
+/**
+ * Point a prepared request at another peer.
+ *
+ * @xpu_addr is the raw peer handle fi_av_lookup2(FI_XPU) produced, which is
+ * the address already resolved - there is no address vector to look it up in
+ * from a kernel, which is the whole difference from the host call.
+ *
+ * A receive request names no peer, so there is nothing to change and the call
+ * succeeds, as it does on the host.
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_modify_addr(void *ep, void *wr, enum fi_op_type op_type,
+		       const void *xpu_addr, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr)
+		return -FI_EINVAL;
+
+	if (!efa_xpu_wr_op_is_tx(op_type))
+		return 0;
+
+	if (!xpu_addr)
+		return -FI_EINVAL;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader) {
+		struct efa_io_tx_wqe_128 *wqe = (struct efa_io_tx_wqe_128 *) wr;
+		const struct efa_xpu_peer *p =
+			(const struct efa_xpu_peer *) xpu_addr;
+
+		wqe->meta.ah = p->ahn;
+		wqe->meta.dest_qp_num = p->remote_qpn;
+		wqe->meta.qkey = p->remote_qkey;
+	}
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+/**
+ * Replace the local buffer of a prepared request.
+ *
+ * @desc is the packed array of raw memory descriptors fi_mr_get_xpu_desc()
+ * produced, one per buffer and each fi_xpu_ctx_attr::mr_desc_size bytes - not
+ * the array of pointers the host call takes.
+ *
+ * One buffer only, as the prepare accepts: a longer request needs a run of
+ * queue slots a thread cannot claim.
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_modify_iov(void *ep, void *wr, enum fi_op_type op_type,
+		      const struct iovec *iov, const void *desc, size_t count,
+		      int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	const struct efa_xpu_desc *d = (const struct efa_xpu_desc *) desc;
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr || !iov || !desc)
+		return -FI_EINVAL;
+
+	if (count != 1)
+		return -FI_EOPNOTSUPP;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader) {
+		uint64_t addr = (uint64_t) (uintptr_t) iov[0].iov_base;
+		uint32_t len = (uint32_t) iov[0].iov_len;
+
+		if (efa_xpu_wr_op_is_tx(op_type)) {
+			struct efa_io_tx_wqe_128 *wqe =
+				(struct efa_io_tx_wqe_128 *) wr;
+
+			/*
+			 * An inline request carries its payload where the
+			 * buffer descriptor would be, and nothing prepares
+			 * one on the device, so there is none to replace.
+			 */
+			if (wqe->meta.ctrl1 &
+			    EFA_IO_TX_META_DESC_INLINE_MSG_MASK) {
+				ret = -FI_EOPNOTSUPP;
+			} else {
+				efa_xpu_set_buf(efa_xpu_wr_local_buf(wqe,
+								     op_type),
+						d[0].lkey, addr, len);
+				/*
+				 * An RMA transfer's length is the total of its
+				 * local buffers, so the remote side follows.
+				 */
+				if (op_type != FI_OP_SEND)
+					wqe->data.rdma_req.remote_mem.length =
+						len;
+			}
+		} else {
+			struct efa_io_rx_desc *rqe = (struct efa_io_rx_desc *) wr;
+
+			rqe->buf_addr_lo = (uint32_t) (addr & 0xFFFFFFFF);
+			rqe->buf_addr_hi = (uint32_t) (addr >> 32);
+			rqe->length = (uint16_t) len;
+			rqe->lkey_ctrl = (d[0].lkey & EFA_IO_RX_DESC_LKEY_MASK) |
+					 EFA_IO_RX_DESC_FIRST_MASK |
+					 EFA_IO_RX_DESC_LAST_MASK;
+		}
+	}
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+/**
+ * Move a prepared RMA request to another remote address.
+ *
+ * The length is not changed here, as it is not on the host: an RMA transfer's
+ * length comes from its local buffers, so a request that should move a
+ * different number of bytes goes through fi_xpu_wr_modify_iov().
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_modify_rma_iov(void *ep, void *wr, enum fi_op_type op_type,
+			  const struct fi_rma_iov *rma_iov, size_t count,
+			  int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr || !rma_iov)
+		return -FI_EINVAL;
+
+	/* Only an rma request has a remote buffer. */
+	if (op_type != FI_OP_READ && op_type != FI_OP_WRITE)
+		return -FI_EINVAL;
+
+	if (count != EFA_IO_TX_DESC_NUM_RDMA_BUFS)
+		return -FI_EINVAL;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader) {
+		struct efa_io_tx_wqe_128 *wqe = (struct efa_io_tx_wqe_128 *) wr;
+		struct efa_io_remote_mem_addr *rm =
+			&wqe->data.rdma_req.remote_mem;
+
+		if (rma_iov[0].len != rm->length) {
+			ret = -FI_EINVAL;
+		} else {
+			rm->rkey = (uint32_t) rma_iov[0].key;
+			rm->buf_addr_lo =
+				(uint32_t) (rma_iov[0].addr & 0xFFFFFFFF);
+			rm->buf_addr_hi = (uint32_t) (rma_iov[0].addr >> 32);
+		}
+	}
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+/* EFA has no tagged messaging, on the device or on the host. */
+FI_XPU_FUNC int
+efa_xpu_wr_modify_tag(void *ep, void *wr, enum fi_op_type op_type,
+		      uint64_t tag, uint64_t ignore, int scope)
+{
+	return -FI_ENOSYS;
+}
+
+/**
+ * Change the remote CQ data a prepared request carries.
+ *
+ * It cannot be added: the descriptor has the immediate only if it was prepared
+ * with FI_REMOTE_CQ_DATA, and a request without it has nowhere to put one.
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_modify_data(void *ep, void *wr, enum fi_op_type op_type,
+		       uint64_t data, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr)
+		return -FI_EINVAL;
+
+	/* Only a transmit request carries remote CQ data. */
+	if (!efa_xpu_wr_op_is_tx(op_type))
+		return -FI_EINVAL;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader) {
+		struct efa_io_tx_wqe_128 *wqe = (struct efa_io_tx_wqe_128 *) wr;
+
+		if (!(wqe->meta.ctrl1 & EFA_IO_TX_META_DESC_HAS_IMM_MASK))
+			ret = -FI_EINVAL;
+		else
+			wqe->meta.immediate_data = (uint32_t) data;
+	}
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+/*
+ * The flags that can be set on a request this provider's device path formats.
+ *
+ * FI_INJECT is not among them, nor are EFA's own FI_EFA_EXTENDED_MSG and
+ * FI_EFA_WR_HIGH_PPS. The first needs the request to carry its payload inline
+ * and the second needs completion action fields, and fi_xpu_wr_prepare()
+ * formats neither, so neither flag could be made true by setting a bit here.
+ * The third would be settable, but it lives in rdma/fi_ext_efa.h, which this
+ * header does not include: that header is installed rather than in the source
+ * tree, so including it would build only against an installed libfabric. A
+ * kernel that wants the hint is a reason to move the flag somewhere both can
+ * reach.
+ */
+#define EFA_XPU_WR_SUPPORTED_FLAGS					\
+	(FI_REMOTE_CQ_DATA | FI_COMPLETION | FI_TRANSMIT_COMPLETE |	\
+	 FI_DELIVERY_COMPLETE)
+
+/**
+ * Change the operation flags of a prepared request.
+ *
+ * A flag that chose how the request was formatted cannot be turned on or off
+ * afterwards, only stated again to match, so what this amounts to on a device
+ * request is a check that the caller and the request still agree.
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_modify_flags(void *ep, void *wr, enum fi_op_type op_type,
+			uint64_t flags, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr)
+		return -FI_EINVAL;
+
+	if (flags & ~(uint64_t) EFA_XPU_WR_SUPPORTED_FLAGS)
+		return -FI_EBADFLAGS;
+
+	/* A receive descriptor carries none of these. */
+	if (!efa_xpu_wr_op_is_tx(op_type))
+		return 0;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader) {
+		struct efa_io_tx_wqe_128 *wqe = (struct efa_io_tx_wqe_128 *) wr;
+		int has_imm = !!(wqe->meta.ctrl1 &
+				 EFA_IO_TX_META_DESC_HAS_IMM_MASK);
+
+		if (!!(flags & FI_REMOTE_CQ_DATA) != has_imm)
+			ret = -FI_EINVAL;
+	}
 
 	return efa_xpu_group_leave(&g, ret);
 }

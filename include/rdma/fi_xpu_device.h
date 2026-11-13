@@ -309,6 +309,11 @@ fi_xpu_wr_modify_addr(struct fid_xpu_ep *ep, fi_wr wr,
 		      enum fi_op_type op_type, const void *xpu_addr, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_modify_addr(ep, wr, op_type, xpu_addr,
+					      scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
@@ -321,6 +326,11 @@ fi_xpu_wr_modify_iov(struct fid_xpu_ep *ep, fi_wr wr,
 		     const void *desc, size_t count, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_modify_iov(ep, wr, op_type, iov, desc, count,
+					     scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
@@ -333,6 +343,11 @@ fi_xpu_wr_modify_rma_iov(struct fid_xpu_ep *ep, fi_wr wr,
 			 int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_modify_rma_iov(ep, wr, op_type, rma_iov,
+						 count, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
@@ -344,6 +359,11 @@ fi_xpu_wr_modify_tag(struct fid_xpu_ep *ep, fi_wr wr,
 		     int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_modify_tag(ep, wr, op_type, tag, ignore,
+					     scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
@@ -354,6 +374,10 @@ fi_xpu_wr_modify_data(struct fid_xpu_ep *ep, fi_wr wr,
 		      enum fi_op_type op_type, uint64_t data, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_modify_data(ep, wr, op_type, data, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
@@ -364,6 +388,10 @@ fi_xpu_wr_modify_flags(struct fid_xpu_ep *ep, fi_wr wr,
 		       enum fi_op_type op_type, uint64_t flags, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_modify_flags(ep, wr, op_type, flags, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}

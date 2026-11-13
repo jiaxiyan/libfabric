@@ -653,10 +653,33 @@ through `free`.
 `sizeof(struct efa_xpu_desc)`.
 
 *FI_XPU_CAP_WR* covers `fi_xpu_wr_prepare`, `fi_xpu_wr_queue_tx`,
-`fi_xpu_wr_queue_recv`, `fi_xpu_tx_flush` and `fi_xpu_recv_flush`. The
-`fi_xpu_wr_modify_*` calls and the tagged forms `fi_xpu_wr_queue_trecv` and
-`fi_xpu_trecv_flush` return *-FI_ENOSYS*; a kernel that needs a different
-address, buffer or key prepares another work request.
+`fi_xpu_wr_queue_recv`, `fi_xpu_tx_flush`, `fi_xpu_recv_flush` and the
+`fi_xpu_wr_modify_*` calls other than `fi_xpu_wr_modify_tag`. That one and the
+tagged forms `fi_xpu_wr_queue_trecv` and `fi_xpu_trecv_flush` return
+*-FI_ENOSYS*, as the provider has no tagged messaging.
+
+The modify calls change a formatted request in place, so a kernel whose
+operation differs from one iteration to the next in one field need not format
+it again. Unlike the queue calls they write to the request, so a request being
+modified is not one another thread may queue.
+
+What a modify may change follows the descriptor: a field the request was not
+prepared to carry has nowhere in the descriptor to go, and cannot be added.
+`fi_xpu_wr_modify_data` requires a request prepared with *FI_REMOTE_CQ_DATA*
+and `fi_xpu_wr_modify_flags` requires the flags to agree with how the request
+was prepared, both failing *-FI_EINVAL* otherwise.
+`fi_xpu_wr_modify_flags` accepts *FI_REMOTE_CQ_DATA*, *FI_COMPLETION*,
+*FI_TRANSMIT_COMPLETE* and *FI_DELIVERY_COMPLETE*, and fails *-FI_EBADFLAGS*
+for anything else, *FI_INJECT* included: the device path formats no request
+with its payload inline.
+
+`fi_xpu_wr_modify_addr` takes the raw peer handle `fi_av_lookup2` with *FI_XPU*
+produced, not an `fi_addr_t`, since a kernel has no address vector to resolve
+one in. `fi_xpu_wr_modify_iov` takes the memory descriptors packed as an array
+of `fi_xpu_ctx_query`'s `mr_desc_size` bytes each, not an array of pointers,
+and takes one buffer only. `fi_xpu_wr_modify_rma_iov` does not change the
+transfer length, which comes from the request's local buffers: a length change
+goes through `fi_xpu_wr_modify_iov`, which carries it to the remote side.
 
 A prepared request is the size `ep_attr->max_tx_wr_size` reports for a send,
 a write or a read, and `ep_attr->max_rx_wr_size` for a receive.
@@ -673,6 +696,12 @@ A receive request describing more than one buffer is refused by
 `fi_xpu_wr_queue_recv` with *-FI_EOPNOTSUPP*: it needs as many consecutive
 queue slots as it has buffers, and a thread claims one. The host's
 `fi_wr_queue_recv` accepts it.
+
+A work request does not record which queue it was prepared for, and neither
+queue call can tell: each reads the request as the kind of descriptor its own
+queue takes, as the host's queue calls do. Queueing a transmit request with
+`fi_xpu_wr_queue_recv`, or the reverse, hands the device a descriptor built
+from the wrong bytes.
 
 The resources a kernel drives are created against that context:
 

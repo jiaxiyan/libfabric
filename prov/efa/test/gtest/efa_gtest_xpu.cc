@@ -1936,6 +1936,69 @@ class EfaXpuDeviceTest : public Test
 		return g;
 	}
 
+	/* A prepared request, from this fixture's buffer, peer and key. */
+	int prep_send(struct efa_io_tx_wqe_128 *wr, uint64_t flags = 0)
+	{
+		struct iovec iov = { data_buf, sizeof(data_buf) };
+		void *descs[1] = { &desc };
+		struct fi_op_msg op = {};
+		struct fi_wr_attr attr = {};
+		size_t wr_len = sizeof(*wr);
+
+		op.msg.msg_iov = &iov;
+		op.msg.iov_count = 1;
+		op.msg.desc = descs;
+		op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+		op.msg.data = 0xfeed;
+		op.flags = flags;
+		attr.op_type = FI_OP_SEND;
+		attr.op.msg = &op;
+
+		return efa_xpu_wr_prepare(&ep_handle, &attr, wr, &wr_len,
+					  FI_XPU_WORK_ITEM);
+	}
+
+	int prep_rma(struct efa_io_tx_wqe_128 *wr, enum fi_op_type op_type,
+		     uint64_t raddr = 0x5000, uint64_t rkey = 0xdef)
+	{
+		struct iovec iov = { data_buf, sizeof(data_buf) };
+		struct fi_rma_iov rma_iov = { raddr, sizeof(data_buf), rkey };
+		void *descs[1] = { &desc };
+		struct fi_op_rma op = {};
+		struct fi_wr_attr attr = {};
+		size_t wr_len = sizeof(*wr);
+
+		op.msg.msg_iov = &iov;
+		op.msg.iov_count = 1;
+		op.msg.desc = descs;
+		op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+		op.msg.rma_iov = &rma_iov;
+		op.msg.rma_iov_count = 1;
+		attr.op_type = op_type;
+		attr.op.rma = &op;
+
+		return efa_xpu_wr_prepare(&ep_handle, &attr, wr, &wr_len,
+					  FI_XPU_WORK_ITEM);
+	}
+
+	int prep_recv(struct efa_io_rx_desc *wr)
+	{
+		struct iovec iov = { data_buf, sizeof(data_buf) };
+		void *descs[1] = { &desc };
+		struct fi_op_msg op = {};
+		struct fi_wr_attr attr = {};
+		size_t wr_len = sizeof(*wr);
+
+		op.msg.msg_iov = &iov;
+		op.msg.iov_count = 1;
+		op.msg.desc = descs;
+		attr.op_type = FI_OP_RECV;
+		attr.op.msg = &op;
+
+		return efa_xpu_wr_prepare(&ep_handle, &attr, wr, &wr_len,
+					  FI_XPU_WORK_ITEM);
+	}
+
 	int post_one(uint64_t flags, uint64_t context = 0)
 	{
 		struct efa_io_tx_wqe wqe = {};
@@ -2855,28 +2918,6 @@ TEST_F(EfaXpuDeviceTest, wr_queue_recv_refuses_a_multi_segment_request)
 	EXPECT_EQ(dev_ep.rq.pc, 0u);
 }
 
-/*
- * A work request says which queue it belongs to only by the meta descriptor
- * bit every send queue entry sets, so each queue call checks it rather than
- * handing the device the other queue's descriptor.
- */
-TEST_F(EfaXpuDeviceTest, the_queue_calls_refuse_each_other_s_requests)
-{
-	struct efa_io_tx_wqe_128 tx = {};
-	struct efa_io_rx_desc rx[1] = {};
-
-	tx.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
-	rx[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK | EFA_IO_RX_DESC_LAST_MASK;
-
-	EXPECT_EQ(efa_xpu_wr_queue_tx(&ep_handle, rx, NULL, FI_XPU_WORK_ITEM),
-		  -FI_EINVAL);
-	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, &tx, NULL,
-					FI_XPU_WORK_ITEM),
-		  -FI_EINVAL);
-	EXPECT_EQ(dev_ep.sq.pc, 0u);
-	EXPECT_EQ(dev_ep.rq.pc, 0u);
-}
-
 TEST_F(EfaXpuDeviceTest, the_queue_calls_reject_a_null_request)
 {
 	EXPECT_EQ(efa_xpu_wr_queue_tx(&ep_handle, NULL, NULL,
@@ -2897,6 +2938,334 @@ TEST_F(EfaXpuDeviceTest, wr_queue_recv_is_refused_without_a_receive_queue)
 
 	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, wr, NULL,
 					FI_XPU_WORK_ITEM),
+		  -FI_EOPNOTSUPP);
+}
+
+/*
+ * Modifying a prepared request. What each call may change follows the
+ * descriptor: a field the request was not prepared to carry has nowhere in the
+ * descriptor to go, so it cannot be added afterwards.
+ */
+TEST_F(EfaXpuDeviceTest, wr_modify_addr_points_a_request_at_another_peer)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct efa_xpu_peer other = {};
+
+	peer.ahn = 3;
+	peer.remote_qpn = 5;
+	peer.remote_qkey = 7;
+	ASSERT_EQ(prep_send(&wr), 0);
+	ASSERT_EQ(wr.meta.ah, 3);
+
+	other.ahn = 11;
+	other.remote_qpn = 13;
+	other.remote_qkey = 17;
+
+	EXPECT_EQ(efa_xpu_wr_modify_addr(&ep_handle, &wr, FI_OP_SEND, &other,
+					 FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr.meta.ah, 11);
+	EXPECT_EQ(wr.meta.dest_qp_num, 13);
+	EXPECT_EQ(wr.meta.qkey, 17u);
+}
+
+/* A receive request names no peer, so there is nothing to change. */
+TEST_F(EfaXpuDeviceTest, wr_modify_addr_leaves_a_receive_request_alone)
+{
+	struct efa_io_rx_desc wr[1] = {};
+	struct efa_io_rx_desc before;
+
+	ASSERT_EQ(prep_recv(wr), 0);
+	before = wr[0];
+
+	EXPECT_EQ(efa_xpu_wr_modify_addr(&ep_handle, wr, FI_OP_RECV, NULL,
+					 FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(memcmp(&before, wr, sizeof(before)), 0);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_addr_rejects_a_transmit_without_a_peer)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+
+	ASSERT_EQ(prep_send(&wr), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_addr(&ep_handle, &wr, FI_OP_SEND, NULL,
+					 FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_iov_replaces_a_send_buffer)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	uint8_t other[32] = {};
+	struct iovec iov = { other, sizeof(other) };
+	struct efa_xpu_desc other_desc = {};
+
+	desc.lkey = 0xabc;
+	ASSERT_EQ(prep_send(&wr), 0);
+	ASSERT_EQ(wr.data.sgl[0].length, 64u);
+
+	other_desc.lkey = 0x123;
+	EXPECT_EQ(efa_xpu_wr_modify_iov(&ep_handle, &wr, FI_OP_SEND, &iov,
+					&other_desc, 1, FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr.data.sgl[0].length, 32u);
+	EXPECT_EQ(wr.data.sgl[0].lkey, 0x123u);
+	EXPECT_EQ(wr.data.sgl[0].buf_addr_lo,
+		  (uint32_t) ((uintptr_t) other & 0xFFFFFFFF));
+}
+
+/*
+ * An RMA transfer's length is the total of its local buffers, so the remote
+ * side follows a change to them - the device would otherwise be asked to move
+ * one length from a buffer of another.
+ */
+TEST_F(EfaXpuDeviceTest, wr_modify_iov_carries_an_rma_length_to_the_remote_side)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	uint8_t other[32] = {};
+	struct iovec iov = { other, sizeof(other) };
+
+	ASSERT_EQ(prep_rma(&wr, FI_OP_WRITE), 0);
+	ASSERT_EQ(wr.data.rdma_req.remote_mem.length, 64u);
+
+	EXPECT_EQ(efa_xpu_wr_modify_iov(&ep_handle, &wr, FI_OP_WRITE, &iov,
+					&desc, 1, FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr.data.rdma_req.local_mem[0].length, 32u);
+	EXPECT_EQ(wr.data.rdma_req.remote_mem.length, 32u);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_iov_replaces_a_receive_buffer)
+{
+	struct efa_io_rx_desc wr[1] = {};
+	uint8_t other[32] = {};
+	struct iovec iov = { other, sizeof(other) };
+
+	desc.lkey = 0xabc;
+	ASSERT_EQ(prep_recv(wr), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_iov(&ep_handle, wr, FI_OP_RECV, &iov,
+					&desc, 1, FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr[0].length, 32u);
+	EXPECT_EQ(wr[0].buf_addr_lo,
+		  (uint32_t) ((uintptr_t) other & 0xFFFFFFFF));
+	EXPECT_EQ(wr[0].lkey_ctrl & EFA_IO_RX_DESC_LAST_MASK,
+		  EFA_IO_RX_DESC_LAST_MASK);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_iov_refuses_more_than_one_buffer)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov[2] = { { data_buf, 32 }, { data_buf + 32, 32 } };
+	struct efa_xpu_desc descs[2] = {};
+
+	ASSERT_EQ(prep_send(&wr), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_iov(&ep_handle, &wr, FI_OP_SEND, iov,
+					descs, 2, FI_XPU_WORK_ITEM),
+		  -FI_EOPNOTSUPP);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_rma_iov_moves_the_remote_address)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct fi_rma_iov rma_iov = { 0x9000, sizeof(data_buf), 0x456 };
+
+	ASSERT_EQ(prep_rma(&wr, FI_OP_WRITE), 0);
+	ASSERT_EQ(wr.data.rdma_req.remote_mem.buf_addr_lo, 0x5000u);
+
+	EXPECT_EQ(efa_xpu_wr_modify_rma_iov(&ep_handle, &wr, FI_OP_WRITE,
+					    &rma_iov, 1, FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr.data.rdma_req.remote_mem.buf_addr_lo, 0x9000u);
+	EXPECT_EQ(wr.data.rdma_req.remote_mem.rkey, 0x456u);
+	EXPECT_EQ(wr.data.rdma_req.remote_mem.length, 64u);
+}
+
+/* A length change goes through fi_xpu_wr_modify_iov, as it does on the host. */
+TEST_F(EfaXpuDeviceTest, wr_modify_rma_iov_refuses_to_change_the_length)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct fi_rma_iov rma_iov = { 0x9000, 32, 0x456 };
+
+	ASSERT_EQ(prep_rma(&wr, FI_OP_WRITE), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_rma_iov(&ep_handle, &wr, FI_OP_WRITE,
+					    &rma_iov, 1, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(wr.data.rdma_req.remote_mem.buf_addr_lo, 0x5000u);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_rma_iov_refuses_what_has_no_remote_buffer)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct fi_rma_iov rma_iov = { 0x9000, sizeof(data_buf), 0x456 };
+
+	ASSERT_EQ(prep_send(&wr), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_rma_iov(&ep_handle, &wr, FI_OP_SEND,
+					    &rma_iov, 1, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_modify_rma_iov(&ep_handle, &wr, FI_OP_WRITE,
+					    &rma_iov, 2, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_data_sets_an_immediate_it_was_prepared_with)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+
+	ASSERT_EQ(prep_send(&wr, FI_REMOTE_CQ_DATA), 0);
+	ASSERT_EQ(wr.meta.immediate_data, 0xfeedu);
+
+	EXPECT_EQ(efa_xpu_wr_modify_data(&ep_handle, &wr, FI_OP_SEND, 0xcafe,
+					 FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr.meta.immediate_data, 0xcafeu);
+}
+
+/* It cannot be added: a request without the immediate has nowhere to put one. */
+TEST_F(EfaXpuDeviceTest, wr_modify_data_refuses_a_request_without_an_immediate)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct efa_io_rx_desc rx[1] = {};
+
+	ASSERT_EQ(prep_send(&wr), 0);
+	ASSERT_EQ(prep_recv(rx), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_data(&ep_handle, &wr, FI_OP_SEND, 0xcafe,
+					 FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_modify_data(&ep_handle, rx, FI_OP_RECV, 0xcafe,
+					 FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_flags_requires_the_prepared_flags)
+{
+	struct efa_io_tx_wqe_128 plain = {};
+	struct efa_io_tx_wqe_128 with_imm = {};
+
+	ASSERT_EQ(prep_send(&plain), 0);
+	ASSERT_EQ(prep_send(&with_imm, FI_REMOTE_CQ_DATA), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_flags(&ep_handle, &plain, FI_OP_SEND, 0,
+					  FI_XPU_WORK_ITEM),
+		  0);
+	EXPECT_EQ(efa_xpu_wr_modify_flags(&ep_handle, &with_imm, FI_OP_SEND,
+					  FI_REMOTE_CQ_DATA,
+					  FI_XPU_WORK_ITEM),
+		  0);
+
+	/* Neither can be turned into the other. */
+	EXPECT_EQ(efa_xpu_wr_modify_flags(&ep_handle, &plain, FI_OP_SEND,
+					  FI_REMOTE_CQ_DATA,
+					  FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_modify_flags(&ep_handle, &with_imm, FI_OP_SEND, 0,
+					  FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_modify_flags_refuses_what_it_cannot_apply)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+
+	ASSERT_EQ(prep_send(&wr), 0);
+
+	/* Nothing on the device formats a request with its payload inline. */
+	EXPECT_EQ(efa_xpu_wr_modify_flags(&ep_handle, &wr, FI_OP_SEND,
+					  FI_INJECT, FI_XPU_WORK_ITEM),
+		  -FI_EBADFLAGS);
+}
+
+/* EFA has no tagged messaging, on the device or on the host. */
+TEST_F(EfaXpuDeviceTest, wr_modify_tag_is_not_implemented)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+
+	EXPECT_EQ(efa_xpu_wr_modify_tag(&ep_handle, &wr, FI_OP_TSEND, 0, 0,
+					FI_XPU_WORK_ITEM),
+		  -FI_ENOSYS);
+}
+
+TEST_F(EfaXpuDeviceTest, the_modify_calls_reject_a_null_request)
+{
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	struct fi_rma_iov rma_iov = { 0, sizeof(data_buf), 0 };
+
+	EXPECT_EQ(efa_xpu_wr_modify_addr(&ep_handle, NULL, FI_OP_SEND, &peer,
+					 FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_modify_iov(&ep_handle, NULL, FI_OP_SEND, &iov,
+					&desc, 1, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_modify_rma_iov(&ep_handle, NULL, FI_OP_WRITE,
+					    &rma_iov, 1, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_modify_data(&ep_handle, NULL, FI_OP_SEND, 0,
+					 FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_modify_flags(&ep_handle, NULL, FI_OP_SEND, 0,
+					  FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+/* What a modify changed is what the queue writes into the ring. */
+TEST_F(EfaXpuDeviceTest, a_modified_request_queues_what_it_was_changed_to)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct efa_xpu_peer other = {};
+
+	ASSERT_EQ(prep_send(&wr), 0);
+
+	other.ahn = 11;
+	other.remote_qpn = 13;
+	other.remote_qkey = 17;
+	ASSERT_EQ(efa_xpu_wr_modify_addr(&ep_handle, &wr, FI_OP_SEND, &other,
+					 FI_XPU_WORK_ITEM),
+		  0);
+	ASSERT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &wr, NULL,
+				      FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wqe_at(0).meta.ah, 11);
+	EXPECT_EQ(wqe_at(0).meta.dest_qp_num, 13);
+	EXPECT_EQ(wqe_at(0).meta.qkey, 17u);
+}
+
+TEST_F(EfaXpuDeviceTest, the_modify_calls_refuse_a_scope_they_cannot_make_collective)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	struct fi_rma_iov rma_iov = { 0x5000, sizeof(data_buf), 0xdef };
+
+	ASSERT_EQ(prep_rma(&wr, FI_OP_WRITE), 0);
+
+	EXPECT_EQ(efa_xpu_wr_modify_addr(&ep_handle, &wr, FI_OP_WRITE, &peer,
+					 FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(efa_xpu_wr_modify_iov(&ep_handle, &wr, FI_OP_WRITE, &iov,
+					&desc, 1, FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(efa_xpu_wr_modify_rma_iov(&ep_handle, &wr, FI_OP_WRITE,
+					    &rma_iov, 1, FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(efa_xpu_wr_modify_data(&ep_handle, &wr, FI_OP_WRITE, 0,
+					 FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(efa_xpu_wr_modify_flags(&ep_handle, &wr, FI_OP_WRITE, 0,
+					  FI_XPU_DEVICE),
 		  -FI_EOPNOTSUPP);
 }
 
@@ -3043,13 +3412,15 @@ TEST_F(EfaXpuDeviceTest, the_queue_calls_refuse_a_scope_they_cannot_make_collect
 	struct efa_io_tx_wqe_128 tx = {};
 	struct efa_io_rx_desc rx[1] = {};
 
-	tx.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
-	rx[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK | EFA_IO_RX_DESC_LAST_MASK;
+	ASSERT_EQ(prep_send(&tx), 0);
+	ASSERT_EQ(prep_recv(rx), 0);
 
 	EXPECT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &tx, NULL, FI_XPU_DEVICE),
 		  -FI_EOPNOTSUPP);
 	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, rx, NULL, FI_XPU_DEVICE),
 		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(dev_ep.sq.pc, 0u);
+	EXPECT_EQ(dev_ep.rq.pc, 0u);
 }
 
 TEST_F(EfaXpuDeviceTest, wr_prepare_refuses_a_scope_it_cannot_make_collective)
