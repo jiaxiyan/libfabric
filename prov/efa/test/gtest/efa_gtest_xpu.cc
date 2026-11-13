@@ -2634,6 +2634,245 @@ TEST_F(EfaXpuDeviceTest, wr_prepare_rejects_null_arguments)
 		  -FI_EINVAL);
 }
 
+/*
+ * Queueing a prepared request puts the same descriptor in the queue as the
+ * direct call it was prepared from. The two land in different slots, which on
+ * the same pass of the ring differ in nothing the descriptor carries, so they
+ * can be compared byte for byte.
+ */
+TEST_F(EfaXpuDeviceTest, wr_queue_tx_writes_what_a_direct_send_writes)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	void *descs[1] = { &desc };
+	struct fi_op_msg op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	peer.ahn = 3;
+	peer.remote_qpn = 5;
+	peer.remote_qkey = 7;
+	desc.lkey = 0xabc;
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+	attr.op_type = FI_OP_SEND;
+	attr.op.msg = &op;
+
+	ASSERT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  0);
+	ASSERT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &wr, NULL,
+				      FI_XPU_WORK_ITEM),
+		  0);
+	ASSERT_EQ(efa_xpu_send(&ep_handle, data_buf, sizeof(data_buf), &desc, 0,
+			       &peer, NULL, 0, FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(memcmp(sq_slot(0), sq_slot(1),
+			 sizeof(struct efa_io_tx_wqe)),
+		  0);
+}
+
+/*
+ * The doorbell is left to a flush, as it is on the host: a kernel queueing a
+ * batch rings once at the end rather than once per request.
+ */
+TEST_F(EfaXpuDeviceTest, wr_queue_tx_leaves_the_doorbell_to_a_flush)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+
+	wr.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
+	wr.meta.length = 1;
+
+	for (int i = 0; i < 3; i++)
+		ASSERT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &wr, NULL,
+					      FI_XPU_WORK_ITEM),
+			  0);
+
+	EXPECT_EQ(dev_ep.sq.pc, 3u);
+	EXPECT_EQ(dev_ep.sq.released, 3u);
+	EXPECT_EQ(sq_db, 0u);
+	EXPECT_EQ(dev_ep.sq.db_rung, 0u);
+}
+
+/* The context of this queueing, not of the prepare, reaches the descriptor. */
+TEST_F(EfaXpuDeviceTest, wr_queue_tx_carries_the_context_of_the_queueing)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+
+	wr.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
+	wr.meta.length = 1;
+	/* What a prepare left behind, which the queueing must overwrite. */
+	efa_xpu_set_wrid(&wr.meta, (void *) 0x999);
+
+	ASSERT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &wr, (void *) 0x1234,
+				      FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wqe_at(0).meta.req_id, 0x1234);
+	/* And the request itself is untouched, so another thread may use it. */
+	EXPECT_EQ(wr.meta.req_id, 0x999);
+}
+
+/* Without a 64-bit request ID the context goes to the send context table. */
+TEST_F(EfaXpuDeviceTest, wr_queue_tx_puts_its_context_in_the_send_table)
+{
+	std::vector<uint64_t> ctx(XPU_TEST_SQ_ENTRIES, 0);
+	std::vector<uint32_t> slot_done(XPU_TEST_SQ_ENTRIES, 0);
+	struct efa_io_tx_wqe_128 wr = {};
+
+	dev_ep.sq.ctx = ctx.data();
+	dev_ep.sq.slot_done = slot_done.data();
+
+	wr.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
+	wr.meta.length = 1;
+
+	ASSERT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &wr, (void *) 0x1234,
+				      FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(ctx[0], 0x1234u);
+	/* The descriptor carries the slot, which is what comes back. */
+	EXPECT_EQ(wqe_at(0).meta.req_id, 0);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_queue_recv_posts_what_a_direct_receive_posts)
+{
+	struct efa_io_rx_desc wr[1] = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	void *descs[1] = { &desc };
+	struct fi_op_msg op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	desc.lkey = 0xabc;
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	attr.op_type = FI_OP_RECV;
+	attr.op.msg = &op;
+
+	ASSERT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  0);
+	ASSERT_EQ(efa_xpu_wr_queue_recv(&ep_handle, wr, NULL,
+					FI_XPU_WORK_ITEM),
+		  0);
+	ASSERT_EQ(efa_xpu_recv(&ep_handle, data_buf, sizeof(data_buf), &desc,
+			       NULL, NULL, 0, FI_XPU_WORK_ITEM),
+		  0);
+
+	/*
+	 * Every field but the request ID, which is the slot each landed in and
+	 * so belongs to the queueing rather than to the request.
+	 */
+	EXPECT_EQ(rqe_at(0).buf_addr_lo, rqe_at(1).buf_addr_lo);
+	EXPECT_EQ(rqe_at(0).buf_addr_hi, rqe_at(1).buf_addr_hi);
+	EXPECT_EQ(rqe_at(0).length, rqe_at(1).length);
+	EXPECT_EQ(rqe_at(0).lkey_ctrl, rqe_at(1).lkey_ctrl);
+	EXPECT_EQ(rqe_at(0).length, 64u);
+	EXPECT_EQ(rqe_at(0).lkey_ctrl & EFA_IO_RX_DESC_LKEY_MASK, 0xabcu);
+	EXPECT_EQ(rqe_at(0).req_id, 0);
+	EXPECT_EQ(rqe_at(1).req_id, 1);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_queue_recv_leaves_the_doorbell_to_a_flush)
+{
+	struct efa_io_rx_desc wr[1] = {};
+
+	wr[0].length = 64;
+	wr[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK | EFA_IO_RX_DESC_LAST_MASK;
+
+	ASSERT_EQ(efa_xpu_wr_queue_recv(&ep_handle, wr, NULL,
+					FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(dev_ep.rq.released, 1u);
+	EXPECT_EQ(rq_db, 0u);
+}
+
+/*
+ * A request of more than one segment needs a run of slots a thread cannot
+ * claim, so it is refused here though the host can queue it.
+ */
+TEST_F(EfaXpuDeviceTest, wr_queue_recv_refuses_a_multi_segment_request)
+{
+	struct efa_io_rx_desc wr[2] = {};
+
+	wr[0].length = 32;
+	wr[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK;
+	wr[1].length = 32;
+	wr[1].lkey_ctrl = EFA_IO_RX_DESC_LAST_MASK;
+
+	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, wr, NULL,
+					FI_XPU_WORK_ITEM),
+		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(dev_ep.rq.pc, 0u);
+}
+
+/*
+ * A work request says which queue it belongs to only by the meta descriptor
+ * bit every send queue entry sets, so each queue call checks it rather than
+ * handing the device the other queue's descriptor.
+ */
+TEST_F(EfaXpuDeviceTest, the_queue_calls_refuse_each_other_s_requests)
+{
+	struct efa_io_tx_wqe_128 tx = {};
+	struct efa_io_rx_desc rx[1] = {};
+
+	tx.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
+	rx[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK | EFA_IO_RX_DESC_LAST_MASK;
+
+	EXPECT_EQ(efa_xpu_wr_queue_tx(&ep_handle, rx, NULL, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, &tx, NULL,
+					FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(dev_ep.sq.pc, 0u);
+	EXPECT_EQ(dev_ep.rq.pc, 0u);
+}
+
+TEST_F(EfaXpuDeviceTest, the_queue_calls_reject_a_null_request)
+{
+	EXPECT_EQ(efa_xpu_wr_queue_tx(&ep_handle, NULL, NULL,
+				      FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, NULL, NULL,
+					FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+/* An endpoint whose queue pair has no receive queue has none to fill. */
+TEST_F(EfaXpuDeviceTest, wr_queue_recv_is_refused_without_a_receive_queue)
+{
+	struct efa_io_rx_desc wr[1] = {};
+
+	wr[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK | EFA_IO_RX_DESC_LAST_MASK;
+	dev_ep.rq.db = NULL;
+
+	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, wr, NULL,
+					FI_XPU_WORK_ITEM),
+		  -FI_EOPNOTSUPP);
+}
+
+TEST_F(EfaXpuDeviceTest, the_queue_calls_refuse_a_scope_they_cannot_make_collective)
+{
+	struct efa_io_tx_wqe_128 tx = {};
+	struct efa_io_rx_desc rx[1] = {};
+
+	tx.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
+	rx[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK | EFA_IO_RX_DESC_LAST_MASK;
+
+	EXPECT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &tx, NULL, FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(efa_xpu_wr_queue_recv(&ep_handle, rx, NULL, FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+}
+
 TEST_F(EfaXpuDeviceTest, wr_prepare_refuses_a_scope_it_cannot_make_collective)
 {
 	struct efa_io_tx_wqe_128 wr = {};

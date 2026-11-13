@@ -276,4 +276,113 @@ efa_xpu_wr_prepare(void *ep, const struct fi_wr_attr *attr, void *wr,
 	return efa_xpu_group_leave(&g, ret);
 }
 
+/**
+ * Queue a prepared send or RMA request on the send queue.
+ *
+ * The request is const and may be queued by other threads at the same time,
+ * so it is copied and only the copy is given what belongs to this queueing:
+ * the slot's phase bit and the request ID carrying @context, both written by
+ * the post.
+ *
+ * The doorbell is left for a flush, as the host's fi_wr_queue_tx() leaves it:
+ * a kernel queueing a batch rings once at the end rather than once per
+ * request, so nothing here is on the fabric until fi_xpu_tx_flush() - or a
+ * later batch filling the device's staging limit - rings it.
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_queue_tx(void *ep, const void *wr, void *context, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr)
+		return -FI_EINVAL;
+
+	if (!efa_xpu_wr_is_tx(wr))
+		return -FI_EINVAL;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader) {
+		struct efa_io_tx_wqe wqe;
+
+		/*
+		 * The leading bytes of the prepared request, which are the
+		 * whole of it for every operation formatted today: the wide
+		 * entry's extra room holds inline data, which nothing puts
+		 * there yet.
+		 */
+		memcpy(&wqe, wr, sizeof(wqe));
+		ret = efa_xpu_post_wqe(e, &wqe, context, FI_MORE);
+	}
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+/**
+ * Queue a prepared receive request on the receive queue.
+ *
+ * A receive descriptor holds a buffer, a length and a key and nothing else, so
+ * the request is taken apart and posted the way a direct receive is; the slot
+ * it lands in supplies its request ID.
+ *
+ * The receive descriptor's request ID is the slot, which leaves nowhere to put
+ * a context, so one is kept in the queue's context table as it is for a direct
+ * receive.
+ */
+FI_XPU_FUNC int
+efa_xpu_wr_queue_recv(void *ep, const void *wr, void *context, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	const struct efa_io_rx_desc *prepared = (const struct efa_io_rx_desc *) wr;
+	struct efa_xpu_group g;
+	uint64_t buf;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (!wr)
+		return -FI_EINVAL;
+
+	/* An endpoint whose queue pair has no receive queue has none to fill. */
+	if (!e->rq.db)
+		return -FI_EOPNOTSUPP;
+
+	if (efa_xpu_wr_is_tx(wr))
+		return -FI_EINVAL;
+
+	/*
+	 * A request describing more than one segment needs as many consecutive
+	 * slots as it has segments, where a thread here claims one. Until a
+	 * claim can cover a run, only a request whose first segment is also
+	 * its last can be queued - which the host side can queue either way,
+	 * so such a request is still worth preparing.
+	 */
+	if (!(prepared[0].lkey_ctrl & EFA_IO_RX_DESC_LAST_MASK))
+		return -FI_EOPNOTSUPP;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	buf = ((uint64_t) prepared[0].buf_addr_hi << 32) |
+	      prepared[0].buf_addr_lo;
+
+	if (g.leader)
+		ret = efa_xpu_post_rqe(e, (void *) (uintptr_t) buf,
+				       prepared[0].length,
+				       prepared[0].lkey_ctrl &
+					       EFA_IO_RX_DESC_LKEY_MASK,
+				       context, FI_MORE);
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
 #endif /* FI_XPU_DEVICE_EFA_WR_H */
