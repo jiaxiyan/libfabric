@@ -647,9 +647,32 @@ application keeps those mappings. A table that breaks either rule, or whose
 for, or without the dmabuf fd *FI_XPU_ALLOC_DMABUF* asked for, fails the open or
 export it was called from with *-FI_EINVAL*, and the memory is handed back
 through `free`.
-`fi_xpu_ctx_query` reports *FI_XPU_CAP_EP*, *FI_XPU_CAP_CQ* and
-*FI_XPU_CAP_CNTR*, an `av_addr_size` of `sizeof(struct efa_xpu_peer)` and an
-`mr_desc_size` of `sizeof(struct efa_xpu_desc)`.
+`fi_xpu_ctx_query` reports *FI_XPU_CAP_EP*, *FI_XPU_CAP_CQ*,
+*FI_XPU_CAP_CNTR* and *FI_XPU_CAP_WR*, an `av_addr_size` of
+`sizeof(struct efa_xpu_peer)` and an `mr_desc_size` of
+`sizeof(struct efa_xpu_desc)`.
+
+*FI_XPU_CAP_WR* covers `fi_xpu_wr_prepare`, `fi_xpu_wr_queue_tx`,
+`fi_xpu_wr_queue_recv`, `fi_xpu_tx_flush` and `fi_xpu_recv_flush`. The
+`fi_xpu_wr_modify_*` calls and the tagged forms `fi_xpu_wr_queue_trecv` and
+`fi_xpu_trecv_flush` return *-FI_ENOSYS*; a kernel that needs a different
+address, buffer or key prepares another work request.
+
+A prepared request is the size `ep_attr->max_tx_wr_size` reports for a send,
+a write or a read, and `ep_attr->max_rx_wr_size` for a receive.
+`fi_xpu_ctx_query` reports the same two as `max_tx_wr_desc_size` and
+`max_rx_wr_desc_size` when the application requested API version 2.8 or
+later, which is when the attribute struct gained them.
+
+Neither queue call rings the device's doorbell, as their host counterparts do
+not: a request is on the fabric once `fi_xpu_tx_flush` or `fi_xpu_recv_flush`
+rings for it, or once a later batch fills the device's staging limit. A kernel
+that queues requests and never flushes leaves them in the queue.
+
+A receive request describing more than one buffer is refused by
+`fi_xpu_wr_queue_recv` with *-FI_EOPNOTSUPP*: it needs as many consecutive
+queue slots as it has buffers, and a thread claims one. The host's
+`fi_wr_queue_recv` accepts it.
 
 The resources a kernel drives are created against that context:
 

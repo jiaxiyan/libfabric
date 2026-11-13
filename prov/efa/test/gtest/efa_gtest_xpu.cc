@@ -644,9 +644,50 @@ TEST_F(EfaXpuCtxTest, ctx_query_reports_objects_and_address_sizes)
 	ASSERT_EQ(fi_xpu_ctx_query(xpu_ctx, &attr), 0);
 
 	EXPECT_EQ(attr.caps, (uint64_t) (FI_XPU_CAP_EP | FI_XPU_CAP_CQ |
-					 FI_XPU_CAP_CNTR));
+					 FI_XPU_CAP_CNTR | FI_XPU_CAP_WR));
 	EXPECT_EQ(attr.av_addr_size, sizeof(struct efa_xpu_peer));
 	EXPECT_EQ(attr.mr_desc_size, sizeof(struct efa_xpu_desc));
+}
+
+/*
+ * The work request sizes were added to the attribute struct in 2.8, so an
+ * application that asked for less has no room for them and they are left
+ * alone. What such an application sizes its buffers from instead is
+ * ep_attr->max_tx_wr_size / max_rx_wr_size, which an XPU info always carries
+ * and which report the same two values.
+ */
+TEST_F(EfaXpuCtxTest, ctx_query_leaves_the_work_request_sizes_before_2_8)
+{
+	struct fi_xpu_ctx_attr attr = {};
+
+	attr.max_tx_wr_desc_size = 0xdead;
+	attr.max_rx_wr_desc_size = 0xbeef;
+
+	ASSERT_EQ(fi_xpu_ctx_query(xpu_ctx, &attr), 0);
+	ASSERT_TRUE(attr.caps & FI_XPU_CAP_WR);
+
+	if (FI_VERSION_GE(fi_version(), FI_VERSION(2, 8))) {
+		EXPECT_EQ(attr.max_tx_wr_desc_size,
+			  sizeof(struct efa_io_tx_wqe_128));
+		EXPECT_GT(attr.max_rx_wr_desc_size, 0u);
+	} else {
+		EXPECT_EQ(attr.max_tx_wr_desc_size, 0xdeadu);
+		EXPECT_EQ(attr.max_rx_wr_desc_size, 0xbeefu);
+	}
+}
+
+/*
+ * Whatever the version, the sizes a work request buffer has to be are
+ * reachable, and are the sizes the device header formats into.
+ */
+TEST_F(EfaXpuCtxTest, the_work_request_sizes_are_what_the_endpoint_reports)
+{
+	EXPECT_EQ(resource.info->ep_attr->max_tx_wr_size,
+		  sizeof(struct efa_io_tx_wqe_128));
+	EXPECT_GT(resource.info->ep_attr->max_rx_wr_size, 0u);
+	EXPECT_EQ(resource.info->ep_attr->max_rx_wr_size %
+			  sizeof(struct efa_io_rx_desc),
+		  0u);
 }
 
 /*

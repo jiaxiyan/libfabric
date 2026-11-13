@@ -11,6 +11,7 @@
 #include "efa_cntr.h"
 #include "efa_av.h"
 #include "efa_mr.h"
+#include "efa_wr.h"
 #include "efa_xpu.h"
 
 #include <rdma/fi_xpu_device_efa.h>
@@ -218,9 +219,42 @@ void efa_xpu_mem_put_fd(struct fid_xpu_ctx *ctx, int fd)
 static int efa_xpu_ctx_query(struct fid_xpu_ctx *ctx,
 			     struct fi_xpu_ctx_attr *attr)
 {
-	attr->caps = FI_XPU_CAP_EP | FI_XPU_CAP_CQ | FI_XPU_CAP_CNTR;
+	struct efa_xpu_ctx *xctx;
+	struct efa_domain *efa_domain;
+	uint32_t api_version;
+
+	xctx = container_of(ctx, struct efa_xpu_ctx, ctx);
+	efa_domain = container_of(xctx->domain, struct efa_domain,
+				  util_domain.domain_fid);
+	api_version =
+		efa_domain->util_domain.fabric->fabric_fid.api_version;
+
+	/*
+	 * The work request calls are implemented on the device wherever the
+	 * endpoint can be exported at all: they are the same send and receive
+	 * queues the direct calls drive, reached through a descriptor that was
+	 * formatted earlier. The modify calls are not implemented, which
+	 * fi_efa(7) records.
+	 */
+	attr->caps = FI_XPU_CAP_EP | FI_XPU_CAP_CQ | FI_XPU_CAP_CNTR |
+		     FI_XPU_CAP_WR;
 	attr->av_addr_size = sizeof(struct efa_xpu_peer);
 	attr->mr_desc_size = sizeof(struct efa_xpu_desc);
+
+	/*
+	 * These two were added to the struct in 2.8, so an application that
+	 * asked for an earlier version has no room for them. It does not need
+	 * them either: they are the sizes fi_getinfo() already reports as
+	 * ep_attr->max_tx_wr_size and max_rx_wr_size, which an XPU info always
+	 * carries, since FI_XPU is offered only where the direct data path -
+	 * and so the work request interface - is supported.
+	 */
+	if (FI_VERSION_GE(api_version, FI_VERSION(2, 8))) {
+		attr->max_tx_wr_desc_size = efa_wr_tx_size();
+		attr->max_rx_wr_desc_size =
+			efa_wr_rx_size(efa_domain->device->efa_attr.max_rq_sge);
+	}
+
 	return 0;
 }
 
