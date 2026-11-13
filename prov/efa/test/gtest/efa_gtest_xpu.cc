@@ -1747,10 +1747,7 @@ class EfaXpuDeviceTest : public Test
 	{
 		struct efa_io_tx_wqe wqe;
 
-		memcpy(&wqe,
-		       sq_ring.data() +
-			       (slot & dev_ep.sq.queue_mask) * sizeof(struct efa_io_tx_wqe),
-		       sizeof(wqe));
+		memcpy(&wqe, sq_slot(slot), sizeof(wqe));
 		return wqe;
 	}
 
@@ -1758,11 +1755,40 @@ class EfaXpuDeviceTest : public Test
 	{
 		struct efa_io_rx_desc rqe;
 
-		memcpy(&rqe,
-		       rq_ring.data() + (slot & dev_ep.rq.queue_mask) *
-						sizeof(struct efa_io_rx_desc),
-		       sizeof(rqe));
+		memcpy(&rqe, rq_slot(slot), sizeof(rqe));
 		return rqe;
+	}
+
+	/*
+	 * The ring strides by the entry size the device reported, which is not
+	 * the size of the descriptor written into it on a queue created for
+	 * wide entries.
+	 */
+	const uint8_t *sq_slot(uint32_t slot) const
+	{
+		return sq_ring.data() +
+		       (slot & dev_ep.sq.queue_mask) * dev_ep.sq.entry_size;
+	}
+
+	const uint8_t *rq_slot(uint32_t slot) const
+	{
+		return rq_ring.data() +
+		       (slot & dev_ep.rq.queue_mask) * dev_ep.rq.entry_size;
+	}
+
+	/* Re-make a ring for a device that reports @entry_size per entry. */
+	void set_sq_entry_size(uint32_t entry_size)
+	{
+		sq_ring.assign(XPU_TEST_SQ_ENTRIES * entry_size, 0);
+		dev_ep.sq.entry_size = entry_size;
+		dev_ep.sq.buf = sq_ring.data();
+	}
+
+	void set_rq_entry_size(uint32_t entry_size)
+	{
+		rq_ring.assign(XPU_TEST_RQ_ENTRIES * entry_size, 0);
+		dev_ep.rq.entry_size = entry_size;
+		dev_ep.rq.buf = rq_ring.data();
 	}
 
 	void write_cqe(uint32_t slot, int phase)
@@ -2093,6 +2119,80 @@ TEST_F(EfaXpuDeviceTest, post_wqe_writes_the_claimed_slot_and_rings_the_doorbell
 	EXPECT_EQ(sq_db, 1u);
 	EXPECT_EQ(dev_ep.sq.db_rung, 1u);
 	EXPECT_EQ(dev_ep.sq.released, 1u);
+}
+
+/*
+ * A queue created for wide 128-byte entries holds the same 64-byte descriptor
+ * in twice the room, so the ring has to stride by the entry size the device
+ * reported. Striding by the descriptor instead would put every slot but the
+ * first at the wrong address, overlapping the entry before it.
+ */
+TEST_F(EfaXpuDeviceTest, post_wqe_strides_a_wide_ring_by_its_entry_size)
+{
+	struct efa_io_tx_wqe wqe = {};
+	struct efa_xpu_group g0 = solo_group();
+	struct efa_xpu_group g1 = solo_group();
+
+	set_sq_entry_size(128);
+	wqe.meta.length = 1;
+
+	ASSERT_EQ(efa_xpu_post_wqe_batch(&dev_ep, &g0, &wqe, (void *) 0x11, 0),
+		  0);
+	ASSERT_EQ(efa_xpu_post_wqe_batch(&dev_ep, &g1, &wqe, (void *) 0x22, 0),
+		  0);
+
+	EXPECT_EQ(wqe_at(0).meta.req_id, 0x11);
+	EXPECT_EQ(wqe_at(1).meta.req_id, 0x22);
+
+	/*
+	 * Striding by the descriptor would have put the second one at offset
+	 * 64, in the tail of the first entry.
+	 */
+	for (size_t i = sizeof(wqe); i < 128; i++)
+		EXPECT_EQ(sq_ring[i], 0) << "byte " << i;
+}
+
+/*
+ * The tail of a wide entry past the descriptor is zeroed, so a slot reused on
+ * a later pass of the ring carries nothing of its last occupant.
+ */
+TEST_F(EfaXpuDeviceTest, post_wqe_zeroes_the_tail_of_a_wide_entry)
+{
+	struct efa_io_tx_wqe wqe = {};
+	struct efa_xpu_group g = solo_group();
+
+	set_sq_entry_size(128);
+	/* What the slot's last occupant left behind. */
+	memset(sq_ring.data(), 0xff, 128);
+	wqe.meta.length = 1;
+
+	ASSERT_EQ(efa_xpu_post_wqe_batch(&dev_ep, &g, &wqe, NULL, 0), 0);
+
+	EXPECT_EQ(wqe_at(0).meta.length, 1);
+	for (size_t i = sizeof(wqe); i < 128; i++)
+		EXPECT_EQ(sq_ring[i], 0) << "byte " << i;
+}
+
+/* The receive queue strides and zero-fills the same way. */
+TEST_F(EfaXpuDeviceTest, post_rqe_strides_a_wide_ring_by_its_entry_size)
+{
+	struct efa_xpu_group g0 = solo_group();
+	struct efa_xpu_group g1 = solo_group();
+
+	set_rq_entry_size(32);
+	memset(rq_ring.data(), 0xff, 32);
+
+	ASSERT_EQ(efa_xpu_post_rqe_batch(&dev_ep, &g0, data_buf,
+					 sizeof(data_buf), desc.lkey, NULL, 0),
+		  0);
+	ASSERT_EQ(efa_xpu_post_rqe_batch(&dev_ep, &g1, data_buf,
+					 sizeof(data_buf), desc.lkey, NULL, 0),
+		  0);
+
+	EXPECT_EQ(rqe_at(0).req_id, 0);
+	EXPECT_EQ(rqe_at(1).req_id, 1);
+	for (size_t i = sizeof(struct efa_io_rx_desc); i < 32; i++)
+		EXPECT_EQ(rq_ring[i], 0) << "byte " << i;
 }
 
 TEST_F(EfaXpuDeviceTest, post_wqe_holds_the_doorbell_back_for_fi_more)

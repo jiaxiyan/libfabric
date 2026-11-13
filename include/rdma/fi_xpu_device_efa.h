@@ -997,6 +997,7 @@ efa_xpu_post_wqe_batch(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
 	efa_xpu_post_begin(&p, &ep->sq, g, flags);
 
 	while (efa_xpu_post_next(&p)) {
+		uint32_t entry_size;
 		uint32_t sq_offset;
 		uint64_t *dst;
 		size_t i;
@@ -1020,21 +1021,31 @@ efa_xpu_post_wqe_batch(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
 		}
 
 		/*
-		 * 64-byte write to the claimed SQ ring slot (BAR MMIO), as eight
-		 * 8-byte stores. The descriptor was filled in field by field, so
-		 * its bytes are gathered with memcpy rather than by reading the
-		 * struct through a uint64_t pointer: a compiler is entitled to
-		 * assume the two types never name the same memory and to drop
-		 * the field stores that such a read appears not to depend on.
+		 * Write the descriptor into the claimed SQ ring slot (BAR MMIO)
+		 * as 8-byte stores. The ring strides by the entry size the
+		 * device reported, not by the size of this descriptor: a queue
+		 * created for wide 128-byte entries holds the same descriptor
+		 * in twice the room, and striding by the descriptor would put
+		 * every slot but the first at the wrong address. The tail past
+		 * the descriptor is zeroed, so a slot reused on a later pass
+		 * carries nothing of its last occupant.
+		 *
+		 * The descriptor was filled in field by field, so its bytes are
+		 * gathered with memcpy rather than by reading the struct through
+		 * a uint64_t pointer: a compiler is entitled to assume the two
+		 * types never name the same memory and to drop the field stores
+		 * that such a read appears not to depend on.
 		 */
-		sq_offset = (p.slot & ep->sq.queue_mask) *
-			    (uint32_t)sizeof(*wqe);
+		entry_size = ep->sq.entry_size;
+		sq_offset = (p.slot & ep->sq.queue_mask) * entry_size;
 		dst = (uint64_t *)(ep->sq.buf + sq_offset);
-		for (i = 0; i < sizeof(*wqe) / sizeof(*dst); i++) {
-			uint64_t word;
+		for (i = 0; i < entry_size / sizeof(*dst); i++) {
+			uint64_t word = 0;
 
-			memcpy(&word, (const uint8_t *)wqe + i * sizeof(word),
-			       sizeof(word));
+			if (i < sizeof(*wqe) / sizeof(word))
+				memcpy(&word,
+				       (const uint8_t *)wqe + i * sizeof(word),
+				       sizeof(word));
 			dst[i] = word;
 		}
 	}
@@ -1077,6 +1088,7 @@ efa_xpu_post_rqe_batch(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
 
 	while (efa_xpu_post_next(&p)) {
 		struct efa_io_rx_desc rqe;
+		uint32_t entry_size;
 		uint32_t rq_offset;
 		uint32_t *dst;
 		size_t i;
@@ -1099,15 +1111,21 @@ efa_xpu_post_rqe_batch(struct efa_xpu_ep *ep, struct efa_xpu_group *g,
 				EFA_IO_RX_DESC_FIRST_MASK |
 				EFA_IO_RX_DESC_LAST_MASK;
 
-		/* Gathered with memcpy for the reason given in post_wqe_batch(). */
-		rq_offset = (p.slot & ep->rq.queue_mask) *
-			    (uint32_t)sizeof(rqe);
+		/*
+		 * Strided by the reported entry size and zero-filled past the
+		 * descriptor, and gathered with memcpy, for the reasons given
+		 * in post_wqe_batch().
+		 */
+		entry_size = ep->rq.entry_size;
+		rq_offset = (p.slot & ep->rq.queue_mask) * entry_size;
 		dst = (uint32_t *)(ep->rq.buf + rq_offset);
-		for (i = 0; i < sizeof(rqe) / sizeof(*dst); i++) {
-			uint32_t word;
+		for (i = 0; i < entry_size / sizeof(*dst); i++) {
+			uint32_t word = 0;
 
-			memcpy(&word, (const uint8_t *)&rqe + i * sizeof(word),
-			       sizeof(word));
+			if (i < sizeof(rqe) / sizeof(word))
+				memcpy(&word,
+				       (const uint8_t *)&rqe + i * sizeof(word),
+				       sizeof(word));
 			dst[i] = word;
 		}
 	}
