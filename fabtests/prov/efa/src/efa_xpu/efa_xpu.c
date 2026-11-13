@@ -71,6 +71,22 @@ static size_t av_addr_size;
 static void *dev_mr_desc;
 static size_t mr_desc_size;
 
+/*
+ * --use-wr: per-issuer work request buffers, which the kernels prepare into
+ * once and then queue from every iteration. One slot per issuer, since a
+ * request holds the issuer's own buffer chunk and peer address, and the queue
+ * calls never write to it. NULL when the kernels use the direct calls.
+ *
+ * The strides are the sizes fi_getinfo() reports; fi_xpu_ctx_query() reports
+ * the same two, but only from API version 2.8, which is when the attribute
+ * struct gained fields for them.
+ */
+static int gda_use_wr;
+static void *dev_wr_tx;
+static void *dev_wr_rx;
+static size_t wr_tx_stride;
+static size_t wr_rx_stride;
+
 /* XPU context query attributes */
 static struct fi_xpu_ctx_attr xpu_ctx_attr;
 
@@ -147,6 +163,14 @@ enum {
 	LONG_OPT_LAT,
 	LONG_OPT_BLOCKS,
 	LONG_OPT_HOST_CQ,
+	/*
+	 * Not the shared harness's --use-wr-api: that one sets FI_WR in the
+	 * hints and reroutes the host posts, and FI_WR rules out FI_CONTEXT2,
+	 * which fi_ep_bind() needs for the FI_SELECTIVE_COMPLETION this test
+	 * does not ask for either way. This option only changes what the
+	 * kernel calls.
+	 */
+	LONG_OPT_XPU_USE_WR,
 };
 
 #define XPU_LOG(fmt, ...)						\
@@ -333,6 +357,49 @@ static int export_av_addr(void)
 
 	free(addr_buf);
 	XPU_LOG("  dev_av_addr=%p size=%zu x %d", dev_av_addr, av_addr_size,
+		xpu_issuers());
+	return 0;
+}
+
+/*
+ * One work request slot per issuer, in device memory, for the kernels to
+ * prepare into. The sizes come from the endpoint rather than from
+ * fi_xpu_ctx_query(), so that a run against a 2.7 library gets them too.
+ */
+static int alloc_wr_bufs(void)
+{
+	size_t total;
+
+	if (!gda_use_wr)
+		return 0;
+
+	wr_tx_stride = fi->ep_attr->max_tx_wr_size;
+	wr_rx_stride = fi->ep_attr->max_rx_wr_size;
+	if (!wr_tx_stride || !wr_rx_stride) {
+		FT_ERR("endpoint reports no work request sizes "
+		       "(tx %zu, rx %zu)", wr_tx_stride, wr_rx_stride);
+		return -FI_EOPNOTSUPP;
+	}
+
+	if (!(xpu_ctx_attr.caps & FI_XPU_CAP_WR)) {
+		FT_ERR("the XPU context does not report FI_XPU_CAP_WR");
+		return -FI_EOPNOTSUPP;
+	}
+
+	total = wr_tx_stride * (size_t) xpu_issuers();
+	if (ft_cuda_alloc(opts.device, &dev_wr_tx, total) != FI_SUCCESS) {
+		FT_ERR("cudaMalloc for the transmit work requests failed");
+		return -FI_ENOMEM;
+	}
+
+	total = wr_rx_stride * (size_t) xpu_issuers();
+	if (ft_cuda_alloc(opts.device, &dev_wr_rx, total) != FI_SUCCESS) {
+		FT_ERR("cudaMalloc for the receive work requests failed");
+		return -FI_ENOMEM;
+	}
+
+	XPU_LOG("  dev_wr_tx=%p x %zu, dev_wr_rx=%p x %zu, %d issuers",
+		dev_wr_tx, wr_tx_stride, dev_wr_rx, wr_rx_stride,
 		xpu_issuers());
 	return 0;
 }
@@ -601,7 +668,8 @@ static int xpu_lat_pass(int is_client, int iters, int depth,
 		rx_buf, opts.transfer_size, dev_mr_desc, mr_desc_size,
 		tx_buf, opts.transfer_size, dev_mr_desc, mr_desc_size,
 		iters, depth, is_client, gda_scope, gda_threads, gda_blocks,
-		fill, stream);
+		fill, dev_wr_tx, wr_tx_stride, dev_wr_rx, wr_rx_stride,
+		stream);
 }
 
 static void xpu_report_round(void)
@@ -770,7 +838,7 @@ static int xpu_bw_pass(int is_client, const struct fi_rma_iov *remote_iov,
 			dev_av_addr, av_addr_size,
 			remote_iov->addr, remote_iov->key,
 			opts.iterations, tx_depth, gda_scope, gda_threads,
-			gda_blocks, fill, stream);
+			gda_blocks, fill, dev_wr_tx, wr_tx_stride, stream);
 	} else if (gda_op == 0 || gda_op == 2) {
 		/*
 		 * A send and a write with immediate data generate receive
@@ -782,7 +850,8 @@ static int xpu_bw_pass(int is_client, const struct fi_rma_iov *remote_iov,
 			rx_buf, opts.transfer_size,
 			dev_mr_desc, mr_desc_size,
 			opts.iterations, rx_depth, gda_scope,
-			gda_threads, gda_blocks, gda_op == 2, stream);
+			gda_threads, gda_blocks, gda_op == 2, dev_wr_rx,
+			wr_rx_stride, stream);
 	}
 
 	/*
@@ -1219,7 +1288,8 @@ static int run_host_cq(void)
 		is_client ? (gda_op == 3 ? rx_buf : tx_buf) : rx_buf,
 		opts.transfer_size, dev_mr_desc, dev_av_addr, av_addr_size,
 		remote_iov.addr, remote_iov.key, opts.iterations, gda_scope,
-		gda_threads, gda_blocks, stream, &run);
+		gda_threads, gda_blocks, is_client ? dev_wr_tx : dev_wr_rx,
+		is_client ? wr_tx_stride : wr_rx_stride, stream, &run);
 	if (ret)
 		goto out;
 
@@ -1293,6 +1363,8 @@ int main(int argc, char **argv)
 				 LONG_OPT_BLOCKS},
 				{"host-cq", no_argument, NULL,
 				 LONG_OPT_HOST_CQ},
+				{"use-wr", no_argument, NULL,
+				 LONG_OPT_XPU_USE_WR},
 				{0, 0, 0, 0}
 			    }, NULL)) != -1) {
 		switch (op) {
@@ -1324,6 +1396,9 @@ int main(int argc, char **argv)
 			break;
 		case LONG_OPT_HOST_CQ:
 			host_cq = true;
+			break;
+		case LONG_OPT_XPU_USE_WR:
+			gda_use_wr = 1;
 			break;
 		case 'o':
 			/*
@@ -1370,6 +1445,12 @@ int main(int argc, char **argv)
 				"the ones posted, once each");
 			FT_PRINT_OPTS_USAGE("--use-cntr",
 				"Use XPU counters instead of CQ polling");
+			FT_PRINT_OPTS_USAGE("--use-wr",
+				"format each operation once with "
+				"fi_xpu_wr_prepare and queue that request "
+				"every iteration, flushing the doorbell, "
+				"instead of calling fi_xpu_send / write / "
+				"read / recv each time");
 			FT_PRINT_OPTS_USAGE("--host-cq",
 				"read completions on the host while the kernel "
 				"only posts, many times the queue depth");
@@ -1720,12 +1801,19 @@ int main(int argc, char **argv)
 			goto out;
 	}
 
-	XPU_LOG("step 12d: export AV address to device handle");
+	if (gda_use_wr) {
+		XPU_LOG("step 12d: allocate the per-issuer work requests");
+		ret = alloc_wr_bufs();
+		if (ret)
+			goto out;
+	}
+
+	XPU_LOG("step 12e: export AV address to device handle");
 	ret = export_av_addr();
 	if (ret)
 		goto out;
 
-	XPU_LOG("step 12e: export MR descriptor to device handle");
+	XPU_LOG("step 12f: export MR descriptor to device handle");
 	ret = export_mr_desc();
 	if (ret)
 		goto out;

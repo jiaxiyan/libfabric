@@ -363,6 +363,156 @@ __device__ static void ft_efa_xpu_fail(struct ft_efa_xpu_status *st)
 	atomicAdd(&st->failures, 1);
 }
 
+/*
+ * Work requests (--use-wr).
+ *
+ * The same operations, formatted once by fi_xpu_wr_prepare() and then queued
+ * with fi_xpu_wr_queue_tx() / fi_xpu_wr_queue_recv() instead of being described
+ * again on every call. Every issuer prepares into a slot of its own, since a
+ * request holds the issuer's own buffer chunk and peer address; the queue calls
+ * never touch it, so the one request serves every iteration.
+ *
+ * A prepared request is passed to the post helpers below as @wr, and a NULL
+ * @wr is what says to use the direct calls instead.
+ *
+ * Neither queue call rings the doorbell, so a flush has to follow a batch of
+ * them or nothing reaches the fabric.
+ */
+__device__ static int ft_efa_xpu_prep_tx(struct fid_xpu_ep *xpu_ep, int opcode,
+					 void *buf, size_t len, void *desc,
+					 void *addr, uint64_t remote_addr,
+					 uint64_t remote_key, void *wr,
+					 size_t wr_len, int scope)
+{
+	struct iovec iov;
+	struct fi_rma_iov rma_iov;
+	void *descs[1];
+	struct fi_op_msg op_msg;
+	struct fi_op_rma op_rma;
+	struct fi_wr_attr attr;
+
+	iov.iov_base = buf;
+	iov.iov_len = len;
+	descs[0] = desc;
+	memset(&attr, 0, sizeof(attr));
+
+	if (opcode == 0) {
+		memset(&op_msg, 0, sizeof(op_msg));
+		op_msg.msg.msg_iov = &iov;
+		op_msg.msg.iov_count = 1;
+		op_msg.msg.desc = descs;
+		op_msg.msg.addr = (fi_addr_t) (uintptr_t) addr;
+		attr.op_type = FI_OP_SEND;
+		attr.op.msg = &op_msg;
+	} else {
+		rma_iov.addr = remote_addr;
+		rma_iov.len = len;
+		rma_iov.key = remote_key;
+
+		memset(&op_rma, 0, sizeof(op_rma));
+		op_rma.msg.msg_iov = &iov;
+		op_rma.msg.iov_count = 1;
+		op_rma.msg.desc = descs;
+		op_rma.msg.addr = (fi_addr_t) (uintptr_t) addr;
+		op_rma.msg.rma_iov = &rma_iov;
+		op_rma.msg.rma_iov_count = 1;
+		if (opcode == 2) {
+			op_rma.msg.data = 0x12345678;
+			op_rma.flags = FI_REMOTE_CQ_DATA;
+		}
+		attr.op_type = (opcode == 3) ? FI_OP_READ : FI_OP_WRITE;
+		attr.op.rma = &op_rma;
+	}
+
+	return fi_xpu_wr_prepare(xpu_ep, &attr, wr, &wr_len, scope);
+}
+
+__device__ static int ft_efa_xpu_prep_rx(struct fid_xpu_ep *xpu_ep, void *buf,
+					 size_t len, void *desc, void *wr,
+					 size_t wr_len, int scope)
+{
+	struct iovec iov;
+	void *descs[1];
+	struct fi_op_msg op_msg;
+	struct fi_wr_attr attr;
+
+	iov.iov_base = buf;
+	iov.iov_len = len;
+	descs[0] = desc;
+
+	memset(&attr, 0, sizeof(attr));
+	memset(&op_msg, 0, sizeof(op_msg));
+	op_msg.msg.msg_iov = &iov;
+	op_msg.msg.iov_count = 1;
+	op_msg.msg.desc = descs;
+	attr.op_type = FI_OP_RECV;
+	attr.op.msg = &op_msg;
+
+	return fi_xpu_wr_prepare(xpu_ep, &attr, wr, &wr_len, scope);
+}
+
+/*
+ * Issue one transmit operation, as a prepared request when @wr is given and as
+ * a direct call otherwise. The two produce the same descriptor, so a run is the
+ * same work either way.
+ */
+__device__ static int ft_efa_xpu_post_tx(struct fid_xpu_ep *xpu_ep, int opcode,
+					 void *buf, size_t len, void *desc,
+					 void *addr, uint64_t remote_addr,
+					 uint64_t remote_key, void *ctx,
+					 uint64_t flags, int scope, void *wr)
+{
+	if (wr)
+		return fi_xpu_wr_queue_tx(xpu_ep, wr, ctx, scope);
+
+	switch (opcode) {
+	case 1: /* write */
+		return fi_xpu_write(xpu_ep, buf, len, desc, 0, addr,
+				    remote_addr, remote_key, ctx, flags,
+				    scope);
+	case 2: /* writedata (write with imm) */
+		return fi_xpu_write(xpu_ep, buf, len, desc, 0x12345678, addr,
+				    remote_addr, remote_key, ctx,
+				    flags | FI_REMOTE_CQ_DATA, scope);
+	case 3: /* read */
+		return fi_xpu_read(xpu_ep, buf, len, desc, addr, remote_addr,
+				   remote_key, ctx, flags, scope);
+	default: /* send */
+		return fi_xpu_send(xpu_ep, buf, len, desc, 0, addr, ctx, flags,
+				   scope);
+	}
+}
+
+__device__ static int ft_efa_xpu_post_rx(struct fid_xpu_ep *xpu_ep, void *buf,
+					 size_t len, void *desc, void *ctx,
+					 uint64_t flags, int scope, void *wr)
+{
+	if (wr)
+		return fi_xpu_wr_queue_recv(xpu_ep, wr, ctx, scope);
+
+	return fi_xpu_recv(xpu_ep, buf, len, desc, NULL, ctx, flags, scope);
+}
+
+/* A queued request is on the fabric only once a flush rings for it. */
+__device__ static int ft_efa_xpu_flush_tx(struct fid_xpu_ep *xpu_ep, int scope,
+					  void *wr)
+{
+	return wr ? fi_xpu_tx_flush(xpu_ep, 0, scope) : 0;
+}
+
+__device__ static int ft_efa_xpu_flush_rx(struct fid_xpu_ep *xpu_ep, int scope,
+					  void *wr)
+{
+	return wr ? fi_xpu_recv_flush(xpu_ep, 0, scope) : 0;
+}
+
+/* This issuer's slot in the per-issuer work request buffer, or NULL. */
+__device__ static void *ft_efa_xpu_wr_slot(void *wr_buf, size_t wr_stride,
+					   int me)
+{
+	return wr_buf ? (char *) wr_buf + (size_t) me * wr_stride : NULL;
+}
+
 /* Read the counter bases a run measures from - see struct ft_efa_xpu_status. */
 __global__ void ft_efa_xpu_cntr_base_kernel(struct fid_xpu_cntr *send_cntr,
 					    struct fid_xpu_cntr *recv_cntr,
@@ -501,6 +651,8 @@ __global__ void ft_efa_xpu_lat_send_kernel(
 	void *send_buf, size_t send_len,
 	void *send_desc, size_t send_desc_size,
 	int iters, int rx_depth, int is_client, int scope, int fill,
+	void *wr_tx_buf, size_t wr_tx_stride,
+	void *wr_rx_buf, size_t wr_rx_stride,
 	struct ft_efa_xpu_status *st)
 {
 	int my_ops, my_depth;
@@ -520,6 +672,8 @@ __global__ void ft_efa_xpu_lat_send_kernel(
 	void *my_recv = (char *) recv_buf + (size_t) me * recv_len;
 	void *my_send = (char *) send_buf + (size_t) me * send_len;
 	void *my_addr = (char *) dest_addr + (size_t) me * dest_addr_size;
+	void *my_tx_wr = ft_efa_xpu_wr_slot(wr_tx_buf, wr_tx_stride, me);
+	void *my_rx_wr = ft_efa_xpu_wr_slot(wr_rx_buf, wr_rx_stride, me);
 
 	my_ops = ft_efa_xpu_issuer_share(iters, scope);
 	my_depth = ft_efa_xpu_issuer_share(rx_depth, scope);
@@ -527,22 +681,45 @@ __global__ void ft_efa_xpu_lat_send_kernel(
 	if (fill)
 		ft_efa_xpu_fill(my_send, send_len, me, scope);
 
+	if (my_tx_wr) {
+		ret = ft_efa_xpu_prep_tx(xpu_ep, 0, my_send, send_len,
+					 send_desc, my_addr, 0, 0, my_tx_wr,
+					 wr_tx_stride, scope);
+		if (!ret)
+			ret = ft_efa_xpu_prep_rx(xpu_ep, my_recv, recv_len,
+						 recv_desc, my_rx_wr,
+						 wr_rx_stride, scope);
+		if (ret) {
+			printf("ft_efa_xpu_lat: wr_prepare failed: %d\n", ret);
+			ft_efa_xpu_fail(st);
+			return;
+		}
+	}
+
 	/*
 	 * Post initial receives batched: defer the RQ doorbell with FI_MORE
-	 * on all but the last post, which rings it for the whole batch.
-	 * (Our XPU API has no explicit flush; a post without FI_MORE flushes.)
+	 * on all but the last post, which rings it for the whole batch. A
+	 * queued request defers it either way, so the flush below rings it.
 	 */
 	for (int i = 0; i < my_depth; i++) {
 		uint64_t rflags = (i + 1 < my_depth) ? FI_MORE : 0;
 
 		ft_efa_xpu_converge(scope);
-		ret = fi_xpu_recv(xpu_ep, my_recv, recv_len, recv_desc,
-				  NULL, FT_EFA_XPU_CTX(me, i), rflags, scope);
+		ret = ft_efa_xpu_post_rx(xpu_ep, my_recv, recv_len, recv_desc,
+					 FT_EFA_XPU_CTX(me, i), rflags, scope,
+					 my_rx_wr);
 		if (ret) {
 			printf("fi_xpu_recv post failed: %d\n", ret);
 			ft_efa_xpu_fail(st);
 			return;
 		}
+	}
+
+	ret = ft_efa_xpu_flush_rx(xpu_ep, scope, my_rx_wr);
+	if (ret) {
+		printf("ft_efa_xpu_lat: recv_flush failed: %d\n", ret);
+		ft_efa_xpu_fail(st);
+		return;
 	}
 
 	while (scnt < my_ops || rcnt < my_ops) {
@@ -579,11 +756,14 @@ __global__ void ft_efa_xpu_lat_send_kernel(
 			/* Repost receive */
 			if (rcnt + my_depth <= my_ops) {
 				ft_efa_xpu_converge(scope);
-				ret = fi_xpu_recv(xpu_ep, my_recv, recv_len,
-						  recv_desc, NULL,
-						  FT_EFA_XPU_CTX(me, rcnt +
-								 my_depth - 1),
-						  0, scope);
+				ret = ft_efa_xpu_post_rx(xpu_ep, my_recv,
+							 recv_len, recv_desc,
+							 FT_EFA_XPU_CTX(me, rcnt +
+									my_depth - 1),
+							 0, scope, my_rx_wr);
+				if (!ret)
+					ret = ft_efa_xpu_flush_rx(xpu_ep, scope,
+								  my_rx_wr);
 				if (ret) {
 					printf("fi_xpu_recv repost failed: %d\n", ret);
 					ft_efa_xpu_fail(st);
@@ -595,9 +775,13 @@ __global__ void ft_efa_xpu_lat_send_kernel(
 		/* Send */
 		if (scnt < my_ops) {
 			ft_efa_xpu_converge(scope);
-			ret = fi_xpu_send(xpu_ep, my_send, send_len,
-					  send_desc, 0, my_addr,
-					  FT_EFA_XPU_CTX(me, scnt), 0, scope);
+			ret = ft_efa_xpu_post_tx(xpu_ep, 0, my_send, send_len,
+						 send_desc, my_addr, 0, 0,
+						 FT_EFA_XPU_CTX(me, scnt), 0,
+						 scope, my_tx_wr);
+			if (!ret)
+				ret = ft_efa_xpu_flush_tx(xpu_ep, scope,
+							  my_tx_wr);
 			if (ret) {
 				printf("fi_xpu_send failed: %d\n", ret);
 				ft_efa_xpu_fail(st);
@@ -663,6 +847,8 @@ int ft_efa_xpu_run_lat_send(struct fid_xpu_ep *xpu_ep,
 			void *send_desc, size_t send_desc_size,
 			int iters, int rx_depth, int is_client,
 			int scope, int threads, int blocks, int fill,
+			void *wr_tx_buf, size_t wr_tx_stride,
+			void *wr_rx_buf, size_t wr_rx_stride,
 			cudaStream_t stream)
 {
 	struct ft_efa_xpu_status *st;
@@ -677,7 +863,8 @@ int ft_efa_xpu_run_lat_send(struct fid_xpu_ep *xpu_ep,
 		dest_addr, dest_addr_size,
 		recv_buf, recv_len, recv_desc, recv_desc_size,
 		send_buf, send_len, send_desc, send_desc_size,
-		iters, rx_depth, is_client, scope, fill, st);
+		iters, rx_depth, is_client, scope, fill,
+		wr_tx_buf, wr_tx_stride, wr_rx_buf, wr_rx_stride, st);
 
 	return ft_efa_xpu_end(__func__, st, stream);
 }
@@ -692,6 +879,7 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 	void *dest_addr, size_t dest_addr_size,
 	uint64_t remote_addr, uint64_t remote_key,
 	int iters, int tx_depth, int scope, int fill,
+	void *wr_buf, size_t wr_stride,
 	struct ft_efa_xpu_status *st)
 {
 	int my_ops, my_depth;
@@ -710,6 +898,7 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 	void *my_buf = (char *) send_buf + (size_t) me * send_len;
 	void *my_addr = (char *) dest_addr + (size_t) me * dest_addr_size;
 	uint64_t my_remote = remote_addr + (uint64_t) me * send_len;
+	void *my_wr = ft_efa_xpu_wr_slot(wr_buf, wr_stride, me);
 
 	my_ops = ft_efa_xpu_issuer_share(iters, scope);
 	my_depth = ft_efa_xpu_issuer_share(tx_depth, scope);
@@ -717,40 +906,27 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 	if (fill)
 		ft_efa_xpu_fill(my_buf, send_len, me, scope);
 
+	/* Formatted once, then queued every iteration. */
+	if (my_wr) {
+		ret = ft_efa_xpu_prep_tx(xpu_ep, opcode, my_buf, send_len,
+					 send_desc, my_addr, my_remote,
+					 remote_key, my_wr, wr_stride, scope);
+		if (ret) {
+			printf("ft_efa_xpu_bw: wr_prepare failed: %d\n", ret);
+			ft_efa_xpu_fail(st);
+			return;
+		}
+	}
+
 	while (scnt < my_ops || ccnt < my_ops) {
 		/* Post operations up to this issuer's share of tx_depth */
 		while (scnt < my_ops && (scnt - ccnt) < my_depth) {
 			ft_efa_xpu_converge(scope);
-			switch (opcode) {
-			case 1: /* write */
-				ret = fi_xpu_write(xpu_ep, my_buf, send_len,
-						   send_desc, 0, my_addr,
-						   my_remote, remote_key,
-						   FT_EFA_XPU_CTX(me, scnt), 0,
-						   scope);
-				break;
-			case 2: /* writedata (write with imm) */
-				ret = fi_xpu_write(xpu_ep, my_buf, send_len,
-						   send_desc, 0x12345678,
-						   my_addr, my_remote,
-						   remote_key,
-						   FT_EFA_XPU_CTX(me, scnt),
-						   FI_REMOTE_CQ_DATA, scope);
-				break;
-			case 3: /* read */
-				ret = fi_xpu_read(xpu_ep, my_buf, send_len,
-						  send_desc, my_addr,
-						  my_remote, remote_key,
-						  FT_EFA_XPU_CTX(me, scnt), 0,
-						  scope);
-				break;
-			default: /* send */
-				ret = fi_xpu_send(xpu_ep, my_buf, send_len,
-						  send_desc, 0, my_addr,
-						  FT_EFA_XPU_CTX(me, scnt), 0,
-						  scope);
-				break;
-			}
+			ret = ft_efa_xpu_post_tx(xpu_ep, opcode, my_buf,
+						 send_len, send_desc, my_addr,
+						 my_remote, remote_key,
+						 FT_EFA_XPU_CTX(me, scnt), 0,
+						 scope, my_wr);
 			if (ret) {
 				printf("ft_efa_xpu_bw: post failed: %d at scnt=%d\n",
 				       ret, scnt);
@@ -758,6 +934,14 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 				return;
 			}
 			scnt++;
+		}
+
+		/* One doorbell for the batch just queued. */
+		ret = ft_efa_xpu_flush_tx(xpu_ep, scope, my_wr);
+		if (ret) {
+			printf("ft_efa_xpu_bw: tx_flush failed: %d\n", ret);
+			ft_efa_xpu_fail(st);
+			return;
 		}
 
 		/*
@@ -825,7 +1009,8 @@ int ft_efa_xpu_run_bw(struct fid_xpu_ep *xpu_ep,
 		  void *dest_addr, size_t dest_addr_size,
 		  uint64_t remote_addr, uint64_t remote_key,
 		  int iters, int tx_depth, int scope, int threads, int blocks,
-		  int fill, cudaStream_t stream)
+		  int fill, void *wr_buf, size_t wr_stride,
+		  cudaStream_t stream)
 {
 	struct ft_efa_xpu_status *st;
 
@@ -837,7 +1022,7 @@ int ft_efa_xpu_run_bw(struct fid_xpu_ep *xpu_ep,
 		send_buf, send_len, send_desc, send_desc_size,
 		dest_addr, dest_addr_size,
 		remote_addr, remote_key,
-		iters, tx_depth, scope, fill, st);
+		iters, tx_depth, scope, fill, wr_buf, wr_stride, st);
 	ft_efa_xpu_exact_kernel<<<1, 1, 0, stream>>>(xpu_send_cq, xpu_send_cntr,
 						  FT_EFA_XPU_SEND, iters, st);
 
@@ -851,6 +1036,7 @@ __global__ void ft_efa_xpu_bw_rx_kernel(
 	void *recv_buf, size_t recv_len,
 	void *recv_desc, size_t recv_desc_size,
 	int iters, int rx_depth, int scope, bool ctx_null_ok,
+	void *wr_buf, size_t wr_stride,
 	struct ft_efa_xpu_status *st)
 {
 	int my_ops, my_depth;
@@ -861,25 +1047,46 @@ __global__ void ft_efa_xpu_bw_rx_kernel(
 	int me = ft_efa_xpu_issuer(scope);
 	/* Every issuer receives into its own chunk - see the tx kernel. */
 	void *my_buf = (char *) recv_buf + (size_t) me * recv_len;
+	void *my_wr = ft_efa_xpu_wr_slot(wr_buf, wr_stride, me);
 
 	my_ops = ft_efa_xpu_issuer_share(iters, scope);
 	my_depth = ft_efa_xpu_issuer_share(rx_depth, scope);
 
+	if (my_wr) {
+		ret = ft_efa_xpu_prep_rx(xpu_ep, my_buf, recv_len, recv_desc,
+					 my_wr, wr_stride, scope);
+		if (ret) {
+			printf("ft_efa_xpu_bw_recv: wr_prepare failed: %d\n",
+			       ret);
+			ft_efa_xpu_fail(st);
+			return;
+		}
+	}
+
 	/*
 	 * Post initial receives batched: defer the RQ doorbell with FI_MORE
-	 * on all but the last post, which rings it for the whole batch.
+	 * on all but the last post, which rings it for the whole batch. A
+	 * queued request defers it either way, so the flush below rings it.
 	 */
 	for (int i = 0; i < my_depth; i++) {
 		uint64_t rflags = (i + 1 < my_depth) ? FI_MORE : 0;
 
 		ft_efa_xpu_converge(scope);
-		ret = fi_xpu_recv(xpu_ep, my_buf, recv_len, recv_desc,
-				  NULL, FT_EFA_XPU_CTX(me, i), rflags, scope);
+		ret = ft_efa_xpu_post_rx(xpu_ep, my_buf, recv_len, recv_desc,
+					 FT_EFA_XPU_CTX(me, i), rflags, scope,
+					 my_wr);
 		if (ret) {
 			printf("ft_efa_xpu_bw_recv: post failed: %d\n", ret);
 			ft_efa_xpu_fail(st);
 			return;
 		}
+	}
+
+	ret = ft_efa_xpu_flush_rx(xpu_ep, scope, my_wr);
+	if (ret) {
+		printf("ft_efa_xpu_bw_recv: recv_flush failed: %d\n", ret);
+		ft_efa_xpu_fail(st);
+		return;
 	}
 
 	while (rcnt < my_ops) {
@@ -913,10 +1120,12 @@ __global__ void ft_efa_xpu_bw_rx_kernel(
 		/* Repost receive */
 		if (rcnt + my_depth <= my_ops) {
 			ft_efa_xpu_converge(scope);
-			ret = fi_xpu_recv(xpu_ep, my_buf, recv_len,
-					  recv_desc, NULL,
-					  FT_EFA_XPU_CTX(me, rcnt + my_depth - 1),
-					  0, scope);
+			ret = ft_efa_xpu_post_rx(xpu_ep, my_buf, recv_len,
+						 recv_desc,
+						 FT_EFA_XPU_CTX(me, rcnt + my_depth - 1),
+						 0, scope, my_wr);
+			if (!ret)
+				ret = ft_efa_xpu_flush_rx(xpu_ep, scope, my_wr);
 			if (ret) {
 				printf("ft_efa_xpu_bw_recv: repost failed: %d\n", ret);
 				ft_efa_xpu_fail(st);
@@ -938,7 +1147,8 @@ int ft_efa_xpu_run_bw_recv(struct fid_xpu_ep *xpu_ep,
 		       void *recv_buf, size_t recv_len,
 		       void *recv_desc, size_t recv_desc_size,
 		       int iters, int rx_depth, int scope, int threads,
-		       int blocks, int ctx_null_ok, cudaStream_t stream)
+		       int blocks, int ctx_null_ok, void *wr_buf,
+		       size_t wr_stride, cudaStream_t stream)
 {
 	struct ft_efa_xpu_status *st;
 
@@ -948,7 +1158,7 @@ int ft_efa_xpu_run_bw_recv(struct fid_xpu_ep *xpu_ep,
 	ft_efa_xpu_bw_rx_kernel<<<blocks, threads, 0, stream>>>(
 		xpu_ep, xpu_recv_cq, xpu_recv_cntr,
 		recv_buf, recv_len, recv_desc, recv_desc_size,
-		iters, rx_depth, scope, !!ctx_null_ok, st);
+		iters, rx_depth, scope, !!ctx_null_ok, wr_buf, wr_stride, st);
 	ft_efa_xpu_exact_kernel<<<1, 1, 0, stream>>>(xpu_recv_cq, xpu_recv_cntr,
 						  FT_EFA_XPU_RECV, iters, st);
 
@@ -967,44 +1177,54 @@ __global__ void ft_efa_xpu_post_kernel(
 	void *buf, size_t len, void *desc,
 	void *dest_addr, size_t dest_addr_size,
 	uint64_t remote_addr, uint64_t remote_key,
-	int iters, int scope, struct ft_efa_xpu_status *st)
+	int iters, int scope, void *wr_buf, size_t wr_stride,
+	struct ft_efa_xpu_status *st)
 {
 	int me = ft_efa_xpu_issuer(scope);
 	int my_ops = ft_efa_xpu_issuer_share(iters, scope);
 	void *my_buf = (char *) buf + (size_t) me * len;
 	void *my_addr = (char *) dest_addr + (size_t) me * dest_addr_size;
 	uint64_t my_remote = remote_addr + (uint64_t) me * len;
+	void *my_wr = ft_efa_xpu_wr_slot(wr_buf, wr_stride, me);
+	bool is_recv = (opcode == FT_EFA_XPU_OP_RECV);
 	int ret;
+
+	if (my_wr) {
+		ret = is_recv ?
+			ft_efa_xpu_prep_rx(xpu_ep, my_buf, len, desc, my_wr,
+					   wr_stride, scope) :
+			ft_efa_xpu_prep_tx(xpu_ep, opcode, my_buf, len, desc,
+					   my_addr, my_remote, remote_key,
+					   my_wr, wr_stride, scope);
+		if (ret) {
+			printf("ft_efa_xpu_post: wr_prepare failed: %d\n", ret);
+			ft_efa_xpu_fail(st);
+			return;
+		}
+	}
 
 	for (int i = 0; i < my_ops; i++) {
 		ft_efa_xpu_converge(scope);
-		switch (opcode) {
-		case 1: /* write */
-			ret = fi_xpu_write(xpu_ep, my_buf, len, desc, 0,
-					   my_addr, my_remote, remote_key,
-					   FT_EFA_XPU_CTX(me, i), 0, scope);
-			break;
-		case 2: /* writedata */
-			ret = fi_xpu_write(xpu_ep, my_buf, len, desc,
-					   0x12345678, my_addr, my_remote,
-					   remote_key, FT_EFA_XPU_CTX(me, i),
-					   FI_REMOTE_CQ_DATA, scope);
-			break;
-		case 3: /* read */
-			ret = fi_xpu_read(xpu_ep, my_buf, len, desc, my_addr,
-					  my_remote, remote_key,
-					  FT_EFA_XPU_CTX(me, i), 0, scope);
-			break;
-		case FT_EFA_XPU_OP_RECV:
-			ret = fi_xpu_recv(xpu_ep, my_buf, len, desc, NULL,
-					  FT_EFA_XPU_CTX(me, i), 0, scope);
-			break;
-		default: /* send */
-			ret = fi_xpu_send(xpu_ep, my_buf, len, desc, 0,
-					  my_addr, FT_EFA_XPU_CTX(me, i), 0,
-					  scope);
-			break;
-		}
+		if (is_recv)
+			ret = ft_efa_xpu_post_rx(xpu_ep, my_buf, len, desc,
+						 FT_EFA_XPU_CTX(me, i), 0,
+						 scope, my_wr);
+		else
+			ret = ft_efa_xpu_post_tx(xpu_ep, opcode, my_buf, len,
+						 desc, my_addr, my_remote,
+						 remote_key,
+						 FT_EFA_XPU_CTX(me, i), 0,
+						 scope, my_wr);
+		/*
+		 * Ring every iteration rather than batching: nothing here
+		 * reads completions, and the host that does cannot see a
+		 * request that was never rung - a post waiting for room would
+		 * then wait for a completion its own unrung request owes.
+		 */
+		if (!ret)
+			ret = is_recv ?
+				ft_efa_xpu_flush_rx(xpu_ep, scope, my_wr) :
+				ft_efa_xpu_flush_tx(xpu_ep, scope, my_wr);
 		if (ret) {
 			printf("ft_efa_xpu_post: post %d failed: %d\n", i, ret);
 			ft_efa_xpu_fail(st);
@@ -1018,6 +1238,7 @@ int ft_efa_xpu_post_launch(struct fid_xpu_ep *xpu_ep, int opcode,
 			   void *dest_addr, size_t dest_addr_size,
 			   uint64_t remote_addr, uint64_t remote_key,
 			   int iters, int scope, int threads, int blocks,
+			   void *wr_buf, size_t wr_stride,
 			   cudaStream_t stream, void **run)
 {
 	struct ft_efa_xpu_status *st;
@@ -1027,7 +1248,7 @@ int ft_efa_xpu_post_launch(struct fid_xpu_ep *xpu_ep, int opcode,
 
 	ft_efa_xpu_post_kernel<<<blocks, threads, 0, stream>>>(
 		xpu_ep, opcode, buf, len, desc, dest_addr, dest_addr_size,
-		remote_addr, remote_key, iters, scope, st);
+		remote_addr, remote_key, iters, scope, wr_buf, wr_stride, st);
 	if (cudaGetLastError() != cudaSuccess) {
 		cudaFree(st);
 		return -1;
@@ -1096,6 +1317,80 @@ __global__ void ft_efa_xpu_scope_reject_kernel(
 		printf("fi_xpu_cq_read at scope %d: %lld, expected %d\n", scope,
 		       (long long) cq_ret, cq_expect);
 		fails++;
+	}
+
+	/*
+	 * The work request calls take a scope of their own, so each has to
+	 * refuse one it cannot make collective too - a prepare that formatted
+	 * a request the group never agreed on would be as wrong as a post.
+	 */
+	{
+		struct efa_wr_reject_buf {
+			uint8_t bytes[256];
+		} wr;
+		size_t wr_len = sizeof(wr);
+		struct iovec iov = { buf, len };
+		void *descs[1] = { desc };
+		struct fi_op_msg op_msg;
+		struct fi_wr_attr attr;
+
+		memset(&wr, 0, sizeof(wr));
+		memset(&attr, 0, sizeof(attr));
+		memset(&op_msg, 0, sizeof(op_msg));
+		op_msg.msg.msg_iov = &iov;
+		op_msg.msg.iov_count = 1;
+		op_msg.msg.desc = descs;
+		op_msg.msg.addr = (fi_addr_t) (uintptr_t) dest_addr;
+		attr.op_type = FI_OP_SEND;
+		attr.op.msg = &op_msg;
+
+		ret = fi_xpu_wr_prepare(xpu_ep, &attr, &wr, &wr_len, scope);
+		if (ret != -FI_EOPNOTSUPP) {
+			printf("fi_xpu_wr_prepare at scope %d: %d, expected %d\n",
+			       scope, ret, -FI_EOPNOTSUPP);
+			fails++;
+		}
+
+		/*
+		 * A request the queue calls will look at before the scope:
+		 * each checks which queue a request belongs to first, so an
+		 * empty one would be refused for that instead.
+		 */
+		if (!fi_xpu_wr_prepare(xpu_ep, &attr, &wr, &wr_len,
+				       FI_XPU_WORK_ITEM)) {
+			ret = fi_xpu_wr_queue_tx(xpu_ep, &wr, NULL, scope);
+			if (ret != -FI_EOPNOTSUPP) {
+				printf("fi_xpu_wr_queue_tx at scope %d: %d, expected %d\n",
+				       scope, ret, -FI_EOPNOTSUPP);
+				fails++;
+			}
+		}
+
+		attr.op_type = FI_OP_RECV;
+		wr_len = sizeof(wr);
+		if (!fi_xpu_wr_prepare(xpu_ep, &attr, &wr, &wr_len,
+				       FI_XPU_WORK_ITEM)) {
+			ret = fi_xpu_wr_queue_recv(xpu_ep, &wr, NULL, scope);
+			if (ret != -FI_EOPNOTSUPP) {
+				printf("fi_xpu_wr_queue_recv at scope %d: %d, expected %d\n",
+				       scope, ret, -FI_EOPNOTSUPP);
+				fails++;
+			}
+		}
+
+		ret = fi_xpu_tx_flush(xpu_ep, 0, scope);
+		if (ret != -FI_EOPNOTSUPP) {
+			printf("fi_xpu_tx_flush at scope %d: %d, expected %d\n",
+			       scope, ret, -FI_EOPNOTSUPP);
+			fails++;
+		}
+
+		ret = fi_xpu_recv_flush(xpu_ep, 0, scope);
+		if (ret != -FI_EOPNOTSUPP) {
+			printf("fi_xpu_recv_flush at scope %d: %d, expected %d\n",
+			       scope, ret, -FI_EOPNOTSUPP);
+			fails++;
+		}
 	}
 
 	st->failures = fails;

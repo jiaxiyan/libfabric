@@ -69,6 +69,14 @@ extern "C" {
  *                every issuer of every block
  * @fill:         Have every group fill its send chunk with the verification
  *                pattern before its first call
+ * @wr_tx_buf:    Per-issuer work request buffer for the sends, or NULL to use
+ *                the direct calls (--use-wr). When given, every issuer
+ *                formats its operation once with fi_xpu_wr_prepare() and
+ *                queues that request every iteration.
+ * @wr_tx_stride: Bytes per issuer in @wr_tx_buf
+ * @wr_rx_buf:    The same for the receives, which take a descriptor of their
+ *                own
+ * @wr_rx_stride: Bytes per issuer in @wr_rx_buf
  * @stream:       CUDA stream for kernel launch
  *
  * Returns 0 on success, negative on failure.
@@ -85,6 +93,8 @@ int ft_efa_xpu_run_lat_send(struct fid_xpu_ep *xpu_ep,
 			void *send_desc, size_t send_desc_size,
 			int iters, int rx_depth, int is_client,
 			int scope, int threads, int blocks, int fill,
+			void *wr_tx_buf, size_t wr_tx_stride,
+			void *wr_rx_buf, size_t wr_rx_stride,
 			cudaStream_t stream);
 
 /**
@@ -114,6 +124,9 @@ int ft_efa_xpu_run_lat_send(struct fid_xpu_ep *xpu_ep,
  *                every issuer of every block
  * @fill:         Have every group fill its send chunk with the verification
  *                pattern before its first call
+ * @wr_buf:       Per-issuer work request buffer, or NULL to use the direct
+ *                calls (--use-wr); see ft_efa_xpu_run_lat_send()
+ * @wr_stride:    Bytes per issuer in @wr_buf
  * @stream:       CUDA stream for kernel launch
  *
  * Returns 0 on success, negative on failure.
@@ -127,7 +140,8 @@ int ft_efa_xpu_run_bw(struct fid_xpu_ep *xpu_ep,
 		  void *dest_addr, size_t dest_addr_size,
 		  uint64_t remote_addr, uint64_t remote_key,
 		  int iters, int tx_depth, int scope, int threads,
-		  int blocks, int fill, cudaStream_t stream);
+		  int blocks, int fill, void *wr_buf, size_t wr_stride,
+		  cudaStream_t stream);
 
 /**
  * ft_efa_xpu_run_bw_recv - Run receiver side of bandwidth test on GPU.
@@ -150,6 +164,9 @@ int ft_efa_xpu_run_bw(struct fid_xpu_ep *xpu_ep,
  * @threads:      Threads per block
  * @blocks:       Blocks in the grid; the totals are split evenly across
  *                every issuer of every block
+ * @wr_buf:       Per-issuer work request buffer for the receives, or NULL to
+ *                use the direct calls (--use-wr)
+ * @wr_stride:    Bytes per issuer in @wr_buf
  * @stream:       CUDA stream for kernel launch
  *
  * Returns 0 on success, negative on failure.
@@ -160,7 +177,8 @@ int ft_efa_xpu_run_bw_recv(struct fid_xpu_ep *xpu_ep,
 		       void *recv_buf, size_t recv_len,
 		       void *recv_desc, size_t recv_desc_size,
 		       int iters, int rx_depth, int scope, int threads,
-		       int blocks, int ctx_null_ok, cudaStream_t stream);
+		       int blocks, int ctx_null_ok, void *wr_buf,
+		       size_t wr_stride, cudaStream_t stream);
 
 /* The opcode ft_efa_xpu_post_launch() takes to post receives. */
 #define FT_EFA_XPU_OP_RECV	4
@@ -176,7 +194,10 @@ int ft_efa_xpu_run_bw_recv(struct fid_xpu_ep *xpu_ep,
  *
  * @buf, @dest_addr and @remote_addr are bases of per-issuer chunks, as for
  * ft_efa_xpu_run_bw(). @run receives the handle ft_efa_xpu_post_finish()
- * takes.
+ * takes. @wr_buf, when given, is the per-issuer work request buffer the
+ * kernel queues from instead of describing each operation again; it rings the
+ * doorbell every iteration, since the host reading the completions cannot see
+ * a request that was never rung.
  *
  * Returns 0 on success, negative on failure.
  */
@@ -185,6 +206,7 @@ int ft_efa_xpu_post_launch(struct fid_xpu_ep *xpu_ep, int opcode,
 			   void *dest_addr, size_t dest_addr_size,
 			   uint64_t remote_addr, uint64_t remote_key,
 			   int iters, int scope, int threads, int blocks,
+			   void *wr_buf, size_t wr_stride,
 			   cudaStream_t stream, void **run);
 
 /**
