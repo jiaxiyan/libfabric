@@ -30,9 +30,13 @@
 
 #include <rdma/fi_xpu.h>
 #include <rdma/fi_trigger.h>
+/*
+ * For struct fi_wr_attr and the fi_wr handle. The work request calls are
+ * described by the same struct on the device as on the host, which a provider
+ * has to read to format a request, so a forward declaration will not do.
+ */
+#include <rdma/fi_wr.h>
 
-typedef void *fi_wr;
-struct fi_wr_attr;
 struct fi_rma_iov;
 
 /*
@@ -217,6 +221,10 @@ fi_xpu_wr_prepare(struct fid_xpu_ep *ep, const struct fi_wr_attr *attr,
 		  fi_wr wr, size_t *wr_len, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_wr_prepare(ep, attr, wr, wr_len, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}

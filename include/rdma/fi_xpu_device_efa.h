@@ -1144,21 +1144,34 @@ efa_xpu_post_rqe(struct efa_xpu_ep *ep, void *buf, size_t len, uint32_t lkey,
 	return efa_xpu_post_rqe_batch(ep, &g, buf, len, lkey, context, flags);
 }
 
+/*
+ * The meta descriptor of a send queue entry: what names the operation and its
+ * destination, and all that the narrow and the wide entry have in common. It
+ * is set up apart from the entry around it so that a caller building the wide
+ * form - a prepared work request, which must take whichever width the queue
+ * turns out to have - describes its operation the same way as a direct post.
+ * Zeroing the entry is the caller's, which is where its width is known.
+ */
+FI_XPU_FUNC void
+efa_xpu_init_meta(struct efa_io_tx_meta_desc *md, uint32_t op_type,
+		  struct efa_xpu_peer *peer)
+{
+	md->ctrl1 = (uint8_t)(EFA_IO_TX_META_DESC_META_DESC_MASK |
+			      (op_type & EFA_IO_TX_META_DESC_OP_TYPE_MASK));
+	md->ctrl2 = (uint8_t)(EFA_IO_TX_META_DESC_FIRST_MASK |
+			      EFA_IO_TX_META_DESC_LAST_MASK |
+			      EFA_IO_TX_META_DESC_COMP_REQ_MASK);
+	md->ah = peer->ahn;
+	md->dest_qp_num = peer->remote_qpn;
+	md->qkey = peer->remote_qkey;
+}
+
 FI_XPU_FUNC void
 efa_xpu_init_wqe(struct efa_io_tx_wqe *wqe,
 		    uint32_t op_type, struct efa_xpu_peer *peer)
 {
 	memset(wqe, 0, sizeof(*wqe));
-
-	wqe->meta.ctrl1 = (uint8_t)(EFA_IO_TX_META_DESC_META_DESC_MASK |
-				    (op_type &
-				     EFA_IO_TX_META_DESC_OP_TYPE_MASK));
-	wqe->meta.ctrl2 = (uint8_t)(EFA_IO_TX_META_DESC_FIRST_MASK |
-				    EFA_IO_TX_META_DESC_LAST_MASK |
-				    EFA_IO_TX_META_DESC_COMP_REQ_MASK);
-	wqe->meta.ah = peer->ahn;
-	wqe->meta.dest_qp_num = peer->remote_qpn;
-	wqe->meta.qkey = peer->remote_qkey;
+	efa_xpu_init_meta(&wqe->meta, op_type, peer);
 }
 
 
@@ -1862,5 +1875,11 @@ efa_xpu_cq_readerr(void *cq, void *buf, uint64_t flags, int scope)
 
 	return efa_xpu_group_leave(&g, ret);
 }
+
+/*
+ * The work request calls, which build on everything above and are kept apart
+ * from the data path they share it with.
+ */
+#include <rdma/fi_xpu_device_efa_wr.h>
 
 #endif /* FI_XPU_DEVICE_EFA_H */

@@ -2371,6 +2371,283 @@ TEST_F(EfaXpuDeviceTest, send_posts_one_descriptor_to_the_send_queue)
 }
 
 /*
+ * Work requests.
+ *
+ * A prepared request holds the operation and nothing of the queue, so what a
+ * format has to produce is the descriptor a direct post of the same operation
+ * builds, less the slot's phase bit and request ID. The fixture's queue starts
+ * on phase 0 and these post into slot 0 with a null context, so those two
+ * fields are zero on both sides and the whole descriptor can be compared.
+ */
+TEST_F(EfaXpuDeviceTest, wr_prepare_formats_a_send_like_a_direct_post)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	void *descs[1] = { &desc };
+	struct fi_op_msg op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	peer.ahn = 3;
+	peer.remote_qpn = 5;
+	peer.remote_qkey = 7;
+	desc.lkey = 0xabc;
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+	attr.op_type = FI_OP_SEND;
+	attr.op.msg = &op;
+
+	ASSERT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  0);
+	EXPECT_EQ(wr_len, sizeof(struct efa_io_tx_wqe_128));
+	EXPECT_EQ(wr.meta.ctrl1 & EFA_IO_TX_META_DESC_OP_TYPE_MASK,
+		  EFA_IO_SEND);
+	EXPECT_EQ(wr.meta.ah, 3);
+	EXPECT_EQ(wr.data.sgl[0].lkey, 0xabcu);
+	EXPECT_EQ(wr.data.sgl[0].length, 64u);
+
+	ASSERT_EQ(efa_xpu_send(&ep_handle, data_buf, sizeof(data_buf), &desc, 0,
+			       &peer, NULL, 0, FI_XPU_WORK_ITEM),
+		  0);
+	EXPECT_EQ(memcmp(&wr, sq_slot(0), sizeof(struct efa_io_tx_wqe)), 0);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_prepare_formats_a_write_like_a_direct_post)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	struct fi_rma_iov rma_iov = { 0x5000, sizeof(data_buf), 0xdef };
+	void *descs[1] = { &desc };
+	struct fi_op_rma op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	desc.lkey = 0xabc;
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+	op.msg.rma_iov = &rma_iov;
+	op.msg.rma_iov_count = 1;
+	attr.op_type = FI_OP_WRITE;
+	attr.op.rma = &op;
+
+	ASSERT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  0);
+	EXPECT_EQ(wr.meta.ctrl1 & EFA_IO_TX_META_DESC_OP_TYPE_MASK,
+		  EFA_IO_RDMA_WRITE);
+	EXPECT_EQ(wr.data.rdma_req.remote_mem.rkey, 0xdefu);
+	EXPECT_EQ(wr.data.rdma_req.remote_mem.buf_addr_lo, 0x5000u);
+	EXPECT_EQ(wr.data.rdma_req.local_mem[0].lkey, 0xabcu);
+
+	ASSERT_EQ(efa_xpu_write(&ep_handle, data_buf, sizeof(data_buf), &desc,
+				0, &peer, rma_iov.addr, rma_iov.key, NULL, 0,
+				FI_XPU_WORK_ITEM),
+		  0);
+	EXPECT_EQ(memcmp(&wr, sq_slot(0), sizeof(struct efa_io_tx_wqe)), 0);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_prepare_formats_a_read_like_a_direct_post)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	struct fi_rma_iov rma_iov = { 0x5000, sizeof(data_buf), 0xdef };
+	void *descs[1] = { &desc };
+	struct fi_op_rma op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	desc.lkey = 0xabc;
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+	op.msg.rma_iov = &rma_iov;
+	op.msg.rma_iov_count = 1;
+	/* A read carries no immediate, even when the flag asks for one. */
+	op.flags = FI_REMOTE_CQ_DATA;
+	attr.op_type = FI_OP_READ;
+	attr.op.rma = &op;
+
+	ASSERT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  0);
+	EXPECT_EQ(wr.meta.ctrl1 & EFA_IO_TX_META_DESC_OP_TYPE_MASK,
+		  EFA_IO_RDMA_READ);
+	EXPECT_EQ(wr.meta.ctrl1 & EFA_IO_TX_META_DESC_HAS_IMM_MASK, 0);
+
+	ASSERT_EQ(efa_xpu_read(&ep_handle, data_buf, sizeof(data_buf), &desc,
+			       &peer, rma_iov.addr, rma_iov.key, NULL, 0,
+			       FI_XPU_WORK_ITEM),
+		  0);
+	EXPECT_EQ(memcmp(&wr, sq_slot(0), sizeof(struct efa_io_tx_wqe)), 0);
+}
+
+/* A send with FI_REMOTE_CQ_DATA carries the immediate, as a direct one does. */
+TEST_F(EfaXpuDeviceTest, wr_prepare_carries_the_immediate_of_a_send)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	void *descs[1] = { &desc };
+	struct fi_op_msg op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+	op.msg.data = 0xfeed;
+	op.flags = FI_REMOTE_CQ_DATA;
+	attr.op_type = FI_OP_SEND;
+	attr.op.msg = &op;
+
+	ASSERT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr.meta.ctrl1 & EFA_IO_TX_META_DESC_HAS_IMM_MASK,
+		  EFA_IO_TX_META_DESC_HAS_IMM_MASK);
+	EXPECT_EQ(wr.meta.immediate_data, 0xfeedu);
+}
+
+/*
+ * A receive request is a receive descriptor, whose request ID is the slot and
+ * so is left to the queueing.
+ */
+TEST_F(EfaXpuDeviceTest, wr_prepare_formats_a_receive_descriptor)
+{
+	struct efa_io_rx_desc wr[1] = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	void *descs[1] = { &desc };
+	struct fi_op_msg op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	desc.lkey = 0xabc;
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	attr.op_type = FI_OP_RECV;
+	attr.op.msg = &op;
+
+	ASSERT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  0);
+
+	EXPECT_EQ(wr_len, sizeof(struct efa_io_rx_desc));
+	EXPECT_EQ(wr[0].length, 64u);
+	EXPECT_EQ(wr[0].req_id, 0);
+	EXPECT_EQ(wr[0].lkey_ctrl & EFA_IO_RX_DESC_LKEY_MASK, 0xabcu);
+	EXPECT_EQ(wr[0].lkey_ctrl & EFA_IO_RX_DESC_FIRST_MASK,
+		  EFA_IO_RX_DESC_FIRST_MASK);
+	EXPECT_EQ(wr[0].lkey_ctrl & EFA_IO_RX_DESC_LAST_MASK,
+		  EFA_IO_RX_DESC_LAST_MASK);
+}
+
+/* A buffer shorter than the request needs is refused without being written. */
+TEST_F(EfaXpuDeviceTest, wr_prepare_refuses_a_buffer_it_would_overrun)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov = { data_buf, sizeof(data_buf) };
+	void *descs[1] = { &desc };
+	struct fi_op_msg op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(struct efa_io_tx_wqe_128) - 1;
+
+	op.msg.msg_iov = &iov;
+	op.msg.iov_count = 1;
+	op.msg.desc = descs;
+	op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+	attr.op_type = FI_OP_SEND;
+	attr.op.msg = &op;
+
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  -FI_ETOOSMALL);
+	EXPECT_EQ(wr.meta.ctrl1, 0);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_prepare_refuses_an_operation_it_cannot_format)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	attr.op_type = FI_OP_ATOMIC;
+
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  -FI_ENOSYS);
+}
+
+/* Only a single-segment request can be formatted; a thread claims one slot. */
+TEST_F(EfaXpuDeviceTest, wr_prepare_refuses_a_multi_segment_request)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct iovec iov[2] = { { data_buf, 32 }, { data_buf + 32, 32 } };
+	void *descs[2] = { &desc, &desc };
+	struct fi_op_msg op = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	op.msg.msg_iov = iov;
+	op.msg.iov_count = 2;
+	op.msg.desc = descs;
+	op.msg.addr = (fi_addr_t) (uintptr_t) &peer;
+	attr.op_type = FI_OP_SEND;
+	attr.op.msg = &op;
+
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_prepare_rejects_null_arguments)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	attr.op_type = FI_OP_SEND;
+
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, NULL, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, NULL, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, NULL,
+				     FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	/* An op descriptor the op type says must be there. */
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+TEST_F(EfaXpuDeviceTest, wr_prepare_refuses_a_scope_it_cannot_make_collective)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+	struct fi_wr_attr attr = {};
+	size_t wr_len = sizeof(wr);
+
+	attr.op_type = FI_OP_SEND;
+
+	EXPECT_EQ(efa_xpu_wr_prepare(&ep_handle, &attr, &wr, &wr_len,
+				     FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+}
+
+/*
  * A call at any scope is one operation for whoever makes it: at a group scope
  * the leader posts the group's one descriptor. A host build is a group of one,
  * so what this pins is that no scope turns a call into more than one post.
