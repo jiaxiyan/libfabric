@@ -364,6 +364,33 @@ __device__ static void ft_efa_xpu_fail(struct ft_efa_xpu_status *st)
 }
 
 /*
+ * Report what a failed completion said, so a run that ends in -FI_EAVAIL
+ * names the operation and the device's own error rather than only the fact
+ * that something failed.
+ */
+__device__ static void ft_efa_xpu_report_err(const char *who,
+					     struct fid_xpu_cq *cq, int scope)
+{
+	struct fi_cq_err_entry err;
+	int64_t ret;
+
+	if (!ft_efa_xpu_checker(scope))
+		return;
+
+	memset(&err, 0, sizeof(err));
+	ret = fi_xpu_cq_readerr(cq, &err, 0, scope);
+	if (ret == 1)
+		printf("%s: completion failed: err %d prov_errno %d, "
+		       "op_context %p flags 0x%llx len %llu\n", who, err.err,
+		       err.prov_errno, err.op_context,
+		       (unsigned long long) err.flags,
+		       (unsigned long long) err.len);
+	else
+		printf("%s: cq_readerr returned %lld\n", who,
+		       (long long) ret);
+}
+
+/*
  * Work requests (--use-wr).
  *
  * The same operations, formatted once by fi_xpu_wr_prepare() and then queued
@@ -978,6 +1005,10 @@ __global__ void ft_efa_xpu_bw_tx_kernel(
 				} else if (cq_ret != -FI_EAGAIN) {
 					printf("ft_efa_xpu_bw: cq_read failed: %lld at ccnt=%d\n",
 					       (long long) cq_ret, ccnt);
+					if (cq_ret == -FI_EAVAIL)
+						ft_efa_xpu_report_err(
+							"ft_efa_xpu_bw",
+							xpu_send_cq, scope);
 					ft_efa_xpu_fail(st);
 					return;
 				}
