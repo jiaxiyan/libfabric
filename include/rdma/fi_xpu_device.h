@@ -272,6 +272,10 @@ FI_XPU_FUNC int
 fi_xpu_tx_flush(struct fid_xpu_ep *ep, uint64_t flags, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_tx_flush(ep, flags, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}
@@ -281,6 +285,10 @@ FI_XPU_FUNC int
 fi_xpu_recv_flush(struct fid_xpu_ep *ep, uint64_t flags, int scope)
 {
 	switch (ep->fid.prov_id) {
+#ifdef FI_XPU_HAVE_EFA
+	case FI_XPU_PROV_EFA:
+		return efa_xpu_recv_flush(ep, flags, scope);
+#endif
 	default:
 		return -FI_ENOSYS;
 	}

@@ -385,4 +385,69 @@ efa_xpu_wr_queue_recv(void *ep, const void *wr, void *context, int scope)
 	return efa_xpu_group_leave(&g, ret);
 }
 
+/*
+ * Flush initiates what a deferred post or a queued request left unrung. It is
+ * one operation for the whole scope however many threads call it: there is one
+ * queue and one doorbell, so the group's threads would otherwise contend to
+ * ring the same span. The leader rings and the result goes back to the group,
+ * as the completion reads do.
+ *
+ * Flags are reserved on both. A failure means the endpoint is unusable: a
+ * per-request error belongs to the post that produced it, so there is nothing
+ * here a caller could retry.
+ */
+FI_XPU_FUNC int
+efa_xpu_tx_flush(void *ep, uint64_t flags, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (flags)
+		return -FI_EINVAL;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader)
+		ret = efa_xpu_wq_flush(&e->sq);
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
+FI_XPU_FUNC int
+efa_xpu_recv_flush(void *ep, uint64_t flags, int scope)
+{
+	struct efa_xpu_ep *e = efa_xpu_ep_resolve(ep);
+	struct efa_xpu_group g;
+	int ret;
+
+	if (!efa_xpu_ep_compat(e))
+		return -FI_EOPNOTSUPP;
+
+	if (flags)
+		return -FI_EINVAL;
+
+	/*
+	 * An endpoint whose queue pair was created without a receive queue has
+	 * no doorbell to ring. The geometry is only filled in where the queue
+	 * exists, so a null doorbell is what says it does not.
+	 */
+	if (!e->rq.db)
+		return -FI_EOPNOTSUPP;
+
+	ret = efa_xpu_group_enter(&g, scope);
+	if (ret)
+		return ret;
+
+	if (g.leader)
+		ret = efa_xpu_wq_flush(&e->rq);
+
+	return efa_xpu_group_leave(&g, ret);
+}
+
 #endif /* FI_XPU_DEVICE_EFA_WR_H */

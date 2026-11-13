@@ -2859,6 +2859,144 @@ TEST_F(EfaXpuDeviceTest, wr_queue_recv_is_refused_without_a_receive_queue)
 		  -FI_EOPNOTSUPP);
 }
 
+/* A flush rings what the deferred posts left unrung, in one doorbell. */
+TEST_F(EfaXpuDeviceTest, tx_flush_rings_what_the_deferred_posts_left)
+{
+	for (uint32_t i = 0; i < 3; i++)
+		ASSERT_EQ(post_one(FI_MORE), 0);
+
+	ASSERT_EQ(sq_db, 0u);
+
+	EXPECT_EQ(efa_xpu_tx_flush(&ep_handle, 0, FI_XPU_WORK_ITEM), 0);
+
+	EXPECT_EQ(sq_db, 3u);
+	EXPECT_EQ(dev_ep.sq.db_rung, 3u);
+}
+
+/*
+ * A flush rings to released, not to pc. A slot in [released, pc) is claimed
+ * and still being written, so naming it would hand the device a descriptor
+ * that is not there yet.
+ */
+TEST_F(EfaXpuDeviceTest, tx_flush_rings_only_as_far_as_the_turn_was_handed_on)
+{
+	dev_ep.sq.pc = 6;
+	dev_ep.sq.released = 1;
+	dev_ep.sq.db_rung = 0;
+
+	EXPECT_EQ(efa_xpu_tx_flush(&ep_handle, 0, FI_XPU_WORK_ITEM), 0);
+
+	EXPECT_EQ(sq_db, 1u);
+	EXPECT_EQ(dev_ep.sq.db_rung, 1u);
+}
+
+/* A flush with nothing unrung leaves the doorbell alone. */
+TEST_F(EfaXpuDeviceTest, tx_flush_with_nothing_to_do_rings_nothing)
+{
+	ASSERT_EQ(post_one(0), 0);
+	ASSERT_EQ(sq_db, 1u);
+	sq_db = 0;
+
+	EXPECT_EQ(efa_xpu_tx_flush(&ep_handle, 0, FI_XPU_WORK_ITEM), 0);
+
+	EXPECT_EQ(sq_db, 0u);
+	EXPECT_EQ(dev_ep.sq.db_rung, 1u);
+}
+
+/* The doorbell never goes backwards, which is what db_lock is there to keep. */
+TEST_F(EfaXpuDeviceTest, a_flush_behind_the_doorbell_does_not_ring_it_back)
+{
+	dev_ep.sq.released = 2;
+	dev_ep.sq.db_rung = 5;
+	sq_db = 5;
+
+	EXPECT_EQ(efa_xpu_tx_flush(&ep_handle, 0, FI_XPU_WORK_ITEM), 0);
+
+	EXPECT_EQ(sq_db, 5u);
+	EXPECT_EQ(dev_ep.sq.db_rung, 5u);
+}
+
+/* A flush leaves the doorbell lock free for the next ringer. */
+TEST_F(EfaXpuDeviceTest, a_flush_releases_the_doorbell_lock)
+{
+	ASSERT_EQ(post_one(FI_MORE), 0);
+
+	ASSERT_EQ(efa_xpu_tx_flush(&ep_handle, 0, FI_XPU_WORK_ITEM), 0);
+	EXPECT_EQ(dev_ep.sq.db_lock, 0u);
+
+	/* Which the next post needs, or it would spin here forever. */
+	ASSERT_EQ(post_one(0), 0);
+	EXPECT_EQ(sq_db, 2u);
+}
+
+TEST_F(EfaXpuDeviceTest, recv_flush_rings_the_receive_doorbell)
+{
+	struct efa_io_rx_desc wr[1] = {};
+
+	wr[0].length = 64;
+	wr[0].lkey_ctrl = EFA_IO_RX_DESC_FIRST_MASK | EFA_IO_RX_DESC_LAST_MASK;
+
+	ASSERT_EQ(efa_xpu_wr_queue_recv(&ep_handle, wr, NULL,
+					FI_XPU_WORK_ITEM),
+		  0);
+	ASSERT_EQ(rq_db, 0u);
+
+	EXPECT_EQ(efa_xpu_recv_flush(&ep_handle, 0, FI_XPU_WORK_ITEM), 0);
+
+	EXPECT_EQ(rq_db, 1u);
+	EXPECT_EQ(dev_ep.rq.db_rung, 1u);
+	/* And the send queue's doorbell is a different one. */
+	EXPECT_EQ(sq_db, 0u);
+}
+
+TEST_F(EfaXpuDeviceTest, recv_flush_is_refused_without_a_receive_queue)
+{
+	dev_ep.rq.db = NULL;
+
+	EXPECT_EQ(efa_xpu_recv_flush(&ep_handle, 0, FI_XPU_WORK_ITEM),
+		  -FI_EOPNOTSUPP);
+}
+
+/* Flags are reserved on both. */
+TEST_F(EfaXpuDeviceTest, the_flush_calls_reject_flags)
+{
+	EXPECT_EQ(efa_xpu_tx_flush(&ep_handle, FI_MORE, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+	EXPECT_EQ(efa_xpu_recv_flush(&ep_handle, FI_MORE, FI_XPU_WORK_ITEM),
+		  -FI_EINVAL);
+}
+
+TEST_F(EfaXpuDeviceTest, the_flush_calls_refuse_a_scope_they_cannot_make_collective)
+{
+	EXPECT_EQ(efa_xpu_tx_flush(&ep_handle, 0, FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+	EXPECT_EQ(efa_xpu_recv_flush(&ep_handle, 0, FI_XPU_DEVICE),
+		  -FI_EOPNOTSUPP);
+}
+
+/* A queued request reaches the fabric once a flush rings for it. */
+TEST_F(EfaXpuDeviceTest, a_queued_request_is_rung_by_a_flush)
+{
+	struct efa_io_tx_wqe_128 wr = {};
+
+	wr.meta.ctrl1 = EFA_IO_TX_META_DESC_META_DESC_MASK | EFA_IO_SEND;
+	wr.meta.length = 1;
+
+	for (int i = 0; i < 4; i++)
+		ASSERT_EQ(efa_xpu_wr_queue_tx(&ep_handle, &wr,
+					      (void *) (uintptr_t) (i + 1),
+					      FI_XPU_WORK_ITEM),
+			  0);
+
+	ASSERT_EQ(sq_db, 0u);
+
+	EXPECT_EQ(efa_xpu_tx_flush(&ep_handle, 0, FI_XPU_WORK_ITEM), 0);
+
+	EXPECT_EQ(sq_db, 4u);
+	for (int i = 0; i < 4; i++)
+		EXPECT_EQ(wqe_at(i).meta.req_id, i + 1);
+}
+
 TEST_F(EfaXpuDeviceTest, the_queue_calls_refuse_a_scope_they_cannot_make_collective)
 {
 	struct efa_io_tx_wqe_128 tx = {};

@@ -1086,6 +1086,7 @@ int efa_ep_export_xpu(struct fid_ep *ep, uint64_t flags,
 		h_ep.sq.pc = 0;
 		h_ep.sq.released = 0;
 		h_ep.sq.db_rung = 0;
+		h_ep.sq.db_lock = 0;
 		h_ep.sq.init_phase = 0;
 		h_ep.sq_size = qp_sq_attr.num_entries;
 
@@ -1099,6 +1100,7 @@ int efa_ep_export_xpu(struct fid_ep *ep, uint64_t flags,
 			h_ep.rq.pc = 0;
 			h_ep.rq.released = 0;
 			h_ep.rq.db_rung = 0;
+			h_ep.rq.db_lock = 0;
 			h_ep.rq.init_phase = 0;
 		}
 

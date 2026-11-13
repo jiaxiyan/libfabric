@@ -194,6 +194,14 @@
  *   db_rung  the value last written to the doorbell, which bounds how many
  *            written-but-unrung descriptors may accumulate.
  *
+ * db_lock guards the doorbell rather than a range of slots. Among posters the
+ * turn on released is enough: each holds a distinct run, so only one of them is
+ * ever eligible to ring. A flush holds no run and so takes no turn, and it
+ * still has to ring, which leaves the turn unable to order it against the
+ * posters - and the doorbell takes monotonically non-decreasing values, so a
+ * smaller value reaching the device after a larger one is not merely late but
+ * wrong. db_lock is what orders them.
+ *
  * A fourth, done, is written by whoever reads the completion queue the work
  * queue reports to: the count of its descriptors whose completions have been
  * consumed, so the slots behind it are free again. The provider's host CQ
@@ -225,6 +233,7 @@ struct efa_xpu_wq {
 	uint32_t  pc;
 	uint32_t  released;
 	uint32_t  db_rung;
+	uint32_t  db_lock;
 	int32_t   init_phase;
 	uint32_t  queue_mask;
 	uint32_t  queue_size_shift;
@@ -659,15 +668,23 @@ efa_xpu_wq_batch(struct efa_xpu_wq *wq)
 /**
  * Ring the doorbell up to, but not including, slot @target.
  *
- * Only the thread holding the turn may call this. The descriptors in
- * [wq->db_rung, target) were written by whichever posters held the turn before
- * it, each of which published its own before handing over. @fenced says the
- * caller has issued a system fence since it observed the turn, which already
- * does the work of the first fence below.
+ * The descriptors in [wq->db_rung, target) must already be published. A poster
+ * calling this holds the turn, so they were written by whichever posters held
+ * it before, each of which published its own before handing over; a flush
+ * (efa_xpu_wq_flush()) rings only as far as the turn has been handed on, which
+ * is the same guarantee. @fenced says the caller has issued a system fence
+ * since it observed the turn, which already does the work of the fence below.
+ *
+ * The doorbell write, @target's test against db_rung and the store of db_rung
+ * all happen under db_lock, because a flush rings without a turn and the
+ * doorbell must never go backwards. @target is re-tested inside the lock since
+ * whoever held it before may already have rung past it.
  */
 FI_XPU_FUNC void
 efa_xpu_wq_ring(struct efa_xpu_wq *wq, uint32_t target, int fenced)
 {
+	uint32_t db_rung;
+
 	/*
 	 * The acquire half of the handoff. The descriptors about to be rung
 	 * were written by other threads, so this fence is not what publishes
@@ -677,10 +694,46 @@ efa_xpu_wq_ring(struct efa_xpu_wq *wq, uint32_t target, int fenced)
 	if (!fenced)
 		EFA_XPU_FENCE_SYSTEM();
 
-	*wq->db = target;
-	EFA_XPU_FENCE_SYSTEM();	/* order the doorbell MMIO write */
+	while (EFA_XPU_ATOMIC_CAS(&wq->db_lock, 0u, 1u) != 0u)
+		;
 
-	EFA_XPU_STORE(&wq->db_rung, target);
+	db_rung = EFA_XPU_LOAD(&wq->db_rung);
+	if ((int32_t)(target - db_rung) > 0) {
+		*wq->db = target;
+		EFA_XPU_FENCE_SYSTEM();	/* order the doorbell MMIO write */
+
+		EFA_XPU_STORE(&wq->db_rung, target);
+	}
+
+	EFA_XPU_ATOMIC_EXCH(&wq->db_lock, 0u);
+}
+
+/**
+ * Ring the doorbell for everything written but left unrung, which is what
+ * fi_xpu_tx_flush() and fi_xpu_recv_flush() do.
+ *
+ * It rings to released, not to pc: a slot in [released, pc) is claimed and
+ * being written, and naming it would hand the device a descriptor that is not
+ * there yet. Everything below released was written and handed on by the poster
+ * that claimed it, so the device may be told about all of it.
+ *
+ * Nothing is waited for here - not the turn, not the queue depth - so a flush
+ * cannot be what a poster is blocked behind.
+ */
+FI_XPU_FUNC int
+efa_xpu_wq_flush(struct efa_xpu_wq *wq)
+{
+	uint32_t target = EFA_XPU_LOAD(&wq->released);
+
+	/*
+	 * A cheap test to keep a flush with nothing to do off the doorbell
+	 * lock. efa_xpu_wq_ring() re-tests it under the lock, so a post that
+	 * rings between the two costs nothing but the lock.
+	 */
+	if (EFA_XPU_LOAD(&wq->db_rung) != target)
+		efa_xpu_wq_ring(wq, target, 0);
+
+	return 0;
 }
 
 /**
