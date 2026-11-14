@@ -1041,6 +1041,10 @@ static int xpu_pt_fill(void *dev_buf, size_t chunk)
 	uint8_t *host;
 	int tid, ret;
 
+	/* A zero-length transfer has no byte to seed. */
+	if (!chunk)
+		return 0;
+
 	host = malloc(total);
 	if (!host)
 		return -FI_ENOMEM;
@@ -1067,6 +1071,18 @@ static int xpu_pt_fill(void *dev_buf, size_t chunk)
  * to appear exactly once - which only holds after a single round. An RMA op
  * carries its own destination offset, so there the chunk in slot tid must be
  * issuer tid's.
+ *
+ * A zero-length transfer has nothing to check. It is not only that there are no
+ * bytes to compare: a send is located by the issuer its first byte names, and a
+ * chunk of no bytes has no first byte, so reading one reads whatever the buffer
+ * held before. That is what this used to do, and it reported the arrival as
+ * belonging to no issuer - which then failed the run on the target, tore its
+ * endpoint down, and left the initiator's next sends to complete with EFA's
+ * REMOTE_ERROR_BAD_DEST_QPN against a queue pair that was no longer there.
+ *
+ * Nothing is lost by returning: how many operations arrived is checked after
+ * every run either way, by draining the completion queue or by reading the
+ * counter (ft_efa_xpu_exact_kernel()).
  */
 static int xpu_pt_check(void *dev_buf, size_t chunk, int unordered, int once)
 {
@@ -1074,6 +1090,9 @@ static int xpu_pt_check(void *dev_buf, size_t chunk, int unordered, int once)
 	size_t total = chunk * (size_t) grid;
 	uint8_t *host, *seen;
 	int slot, ret;
+
+	if (!chunk)
+		return 0;
 
 	host = malloc(total);
 	seen = calloc(grid, 1);
