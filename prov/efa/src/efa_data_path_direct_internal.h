@@ -55,6 +55,9 @@ efa_data_path_direct_rq_ring_doorbell(struct efa_data_path_direct_rq *rq,
 {
 	udma_to_device_barrier(); /* Ensure all writes are visible to device */
 	mmio_write32(rq->wq.db, pc);
+	rq->last_db_val = pc;
+	rq->last_db_ns = ofi_gettime_ns();
+	rq->db_cnt++;
 }
 
 /**

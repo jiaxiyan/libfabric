@@ -132,6 +132,11 @@ struct efa_data_path_direct_rq {
 	/* Mirror of efa_rq in rdma-core/providers/efa/efa.h */
 	struct efa_data_path_direct_wq wq;  /**< Work queue management structure */
 	uint8_t *buf;                       /**< Hardware receive queue buffer */
+
+	/* Doorbell history, for diagnostics only (efa_rdm_ep_dump_rx_state) */
+	uint64_t last_db_ns;                /**< ofi_gettime_ns() of the last RQ doorbell write */
+	uint64_t db_cnt;                    /**< Number of RQ doorbell writes */
+	uint16_t last_db_val;               /**< Producer counter written by the last RQ doorbell */
 };
 
 /**

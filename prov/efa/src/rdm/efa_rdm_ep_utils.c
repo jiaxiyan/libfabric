@@ -3,6 +3,7 @@
 
 #include <inttypes.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include "ofi.h"
 #include <ofi_util.h>
@@ -979,6 +980,173 @@ void efa_rdm_ep_post_internal_rx_pkts(struct efa_rdm_ep *ep)
 err_exit:
 
 	efa_base_ep_write_eq_error(&ep->base_ep, err, FI_EFA_ERR_INTERNAL_RX_BUF_POST);
+}
+
+/* Seconds without a receive completion before the RQ state is dumped */
+#define EFA_RDM_RX_STALL_DUMP_SEC 30
+
+/**
+ * @brief Format a CLOCK_REALTIME time in nanoseconds as UTC with milliseconds
+ *
+ * Example: 2026-11-18 22:29:14.430 UTC
+ */
+static void efa_rdm_format_utc_ns(uint64_t realtime_ns, char *buf, size_t len)
+{
+	struct tm tm;
+	time_t sec = (time_t) (realtime_ns / 1000000000ULL);
+	size_t n;
+
+	if (!gmtime_r(&sec, &tm)) {
+		snprintf(buf, len, "unknown");
+		return;
+	}
+	n = strftime(buf, len, "%Y-%m-%d %H:%M:%S", &tm);
+	if (n)
+		snprintf(buf + n, len - n, ".%03u UTC",
+			 (unsigned) ((realtime_ns % 1000000000ULL) / 1000000));
+}
+
+#if HAVE_EFA_DATA_PATH_DIRECT
+/**
+ * @brief Count the CQ entries that look pending to the host, from the
+ * consumer position, without consuming or modifying anything.
+ *
+ * Walks at most one full ring, flipping the expected phase at each wrap, the
+ * same way efa_data_path_direct_next_device_cqe_get() would. Stale entries
+ * from an earlier lap can be counted, so this is a hint, not a guarantee.
+ */
+static uint32_t efa_rdm_cq_count_phase_matches(struct efa_data_path_direct_cq *cqd)
+{
+	uint32_t idx, n, cnt = 0;
+	int phase = cqd->phase;
+
+	idx = cqd->consumed_cnt & cqd->qmask;
+	for (n = 0; n < cqd->num_entries; n++) {
+		if (!efa_cqe_is_pending(efa_device_cq_get_cqe(cqd, idx), phase))
+			break;
+		cnt++;
+		idx = (idx + 1) & cqd->qmask;
+		if (!idx)
+			phase = 1 - phase;
+	}
+	return cnt;
+}
+#endif /* HAVE_EFA_DATA_PATH_DIRECT */
+
+/**
+ * @brief Print the receive state of an endpoint at warning level.
+ *
+ * Meant for debugging a stalled RQ. It is called by efa_rdm_ep_check_rx_stall()
+ * and can be called from a debugger:
+ *     call efa_rdm_ep_dump_rx_state(ep, "gdb")
+ *
+ * It only reads state. The caller should hold the CQ progress lock, or
+ * accept that the numbers may be torn when called from a debugger.
+ *
+ * @param[in] ep	endpoint
+ * @param[in] reason	short string printed with the dump
+ */
+void efa_rdm_ep_dump_rx_state(struct efa_rdm_ep *ep, const char *reason)
+{
+	struct efa_qp *qp = ep->base_ep.qp;
+	struct timespec wall;
+	uint64_t wall_ns = 0;
+	char wall_str[40] = "unknown";
+
+	if (!clock_gettime(CLOCK_REALTIME, &wall)) {
+		wall_ns = (uint64_t) wall.tv_sec * 1000000000ULL + wall.tv_nsec;
+		efa_rdm_format_utc_ns(wall_ns, wall_str, sizeof(wall_str));
+	}
+
+	EFA_WARN(FI_LOG_EP_DATA,
+		 "[RXDUMP] (%s) time=%s mono_ns=%" PRIu64 " ep=%p qp_num=%u rx_pkts posted=%zu to_post=%zu held=%zu pool_size=%zu\n",
+		 reason, wall_str, ofi_gettime_ns(), ep, qp ? qp->qp_num : 0,
+		 ep->efa_rx_pkts_posted,
+		 ep->efa_rx_pkts_to_post, ep->efa_rx_pkts_held,
+		 efa_base_ep_get_rx_pool_size(&ep->base_ep));
+
+#if HAVE_EFA_DATA_PATH_DIRECT
+	if (qp && qp->data_path_direct_enabled) {
+		struct efa_data_path_direct_rq *rq = &qp->data_path_direct_qp.rq;
+		struct efa_cq *rx_cq = efa_base_ep_get_rx_cq(&ep->base_ep);
+		uint64_t now = ofi_gettime_ns();
+		uint64_t db_age_ns = rq->last_db_ns ? now - rq->last_db_ns : 0;
+		char db_str[40] = "never";
+
+		/* Wall-clock time of the last doorbell, derived from its age */
+		if (rq->last_db_ns && wall_ns)
+			efa_rdm_format_utc_ns(wall_ns - db_age_ns, db_str, sizeof(db_str));
+
+		EFA_WARN(FI_LOG_EP_DATA,
+			 "[RXDUMP] rq: wqe_posted=%u wqe_completed=%u outstanding=%u pc=%u "
+			 "last_db_val=%u last_db_time=%s last_db_age_ms=%" PRIu64 " db_cnt=%" PRIu64 "\n",
+			 rq->wq.wqe_posted, rq->wq.wqe_completed,
+			 rq->wq.wqe_posted - rq->wq.wqe_completed, rq->wq.pc,
+			 rq->last_db_val, db_str, db_age_ns / 1000000,
+			 rq->db_cnt);
+
+		if (rx_cq && rx_cq->ibv_cq.data_path_direct_enabled) {
+			struct efa_data_path_direct_cq *cqd = &rx_cq->ibv_cq.data_path_direct;
+			uint32_t idx = cqd->consumed_cnt & cqd->qmask;
+
+			EFA_WARN(FI_LOG_EP_DATA,
+				 "[RXDUMP] cq=%p: entries=%u consumed_cnt=%u cc=%u (consumed-cc=%u) "
+				 "idx=%u expected_phase=%d phase_at_idx=%d phase_matches_ahead=%u cmd_sn=%u\n",
+				 rx_cq, cqd->num_entries, cqd->consumed_cnt, cqd->cc,
+				 (uint16_t) (cqd->consumed_cnt - cqd->cc), idx, cqd->phase,
+				 EFA_GET(&efa_device_cq_get_cqe(cqd, idx)->flags,
+					 EFA_IO_CDESC_COMMON_PHASE),
+				 efa_rdm_cq_count_phase_matches(cqd), cqd->cmd_sn);
+		}
+	}
+#endif /* HAVE_EFA_DATA_PATH_DIRECT */
+}
+
+/**
+ * @brief Dump the receive state once if the RQ looks stalled.
+ *
+ * An endpoint counts as stalled when it has receives posted to the device
+ * and wqe_completed has not changed for EFA_RDM_RX_STALL_DUMP_SEC seconds. An
+ * idle endpoint matches too, so expect one dump per idle episode. Called from
+ * the CQ progress path with the CQ progress lock held.
+ *
+ * @param[in] ep	endpoint
+ */
+void efa_rdm_ep_check_rx_stall(struct efa_rdm_ep *ep)
+{
+#if HAVE_EFA_DATA_PATH_DIRECT
+	struct efa_qp *qp = ep->base_ep.qp;
+	struct efa_data_path_direct_wq *wq;
+	uint64_t now, limit_ns;
+
+	/* Look at the clock only once per 1024 progress calls */
+	if (OFI_LIKELY(++ep->rx_stall_poll_cnt & 0x3ff))
+		return;
+
+	if (!qp || !ep->base_ep.efa_qp_enabled || !qp->data_path_direct_enabled)
+		return;
+
+	/* Check at most once per second */
+	now = ofi_gettime_ns();
+	if (now - ep->rx_stall_check_ns < 1000000000ULL)
+		return;
+	ep->rx_stall_check_ns = now;
+
+	wq = &qp->data_path_direct_qp.rq.wq;
+	if (!ep->rx_stall_since_ns || wq->wqe_completed != ep->rx_stall_wqe_completed ||
+	    wq->wqe_posted == wq->wqe_completed) {
+		ep->rx_stall_since_ns = now;
+		ep->rx_stall_wqe_completed = wq->wqe_completed;
+		ep->rx_stall_dumped = false;
+		return;
+	}
+
+	limit_ns = (uint64_t) EFA_RDM_RX_STALL_DUMP_SEC * 1000000000ULL;
+	if (!ep->rx_stall_dumped && now - ep->rx_stall_since_ns >= limit_ns) {
+		ep->rx_stall_dumped = true;
+		efa_rdm_ep_dump_rx_state(ep, "no rx completion");
+	}
+#endif
 }
 
 /**

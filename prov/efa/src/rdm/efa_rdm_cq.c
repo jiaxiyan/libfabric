@@ -1133,6 +1133,11 @@ static void efa_rdm_cq_progress(struct util_cq *cq)
 		poll_list_entry = container_of(item, struct efa_ibv_cq_poll_list_entry, entry);
 		(void) efa_rdm_cq_poll_ibv_cq(efa_env.efa_cq_read_size, poll_list_entry->cq);
 	}
+	dlist_foreach(&cq->ep_list, item) {
+		fid_entry = container_of(item, struct fid_list_entry, entry);
+		efa_rdm_ep = container_of(fid_entry->fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
+		efa_rdm_ep_check_rx_stall(efa_rdm_ep);
+	}
 	efa_domain_progress_rdm_peers_and_queues(efa_domain);
 	ofi_genlock_unlock(&cq->ep_list_lock);
 }

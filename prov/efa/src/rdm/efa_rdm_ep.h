@@ -181,6 +181,13 @@ struct efa_rdm_ep {
 	 */
 	size_t efa_rx_pkts_held;
 
+	/* RQ stall dump state */
+	uint32_t rx_stall_poll_cnt;     /* progress calls since start, gates the stall check */
+	uint64_t rx_stall_check_ns;     /* last time the stall check ran */
+	uint64_t rx_stall_since_ns;     /* when wqe_completed last changed */
+	uint32_t rx_stall_wqe_completed;/* wqe_completed at rx_stall_since_ns */
+	bool rx_stall_dumped;           /* already dumped for this stall */
+
 	/* number of outstanding tx ops on efa device */
 	size_t efa_outstanding_tx_ops;
 
@@ -285,6 +292,10 @@ struct efa_domain *efa_rdm_ep_domain(struct efa_rdm_ep *ep)
 }
 
 void efa_rdm_ep_post_internal_rx_pkts(struct efa_rdm_ep *ep);
+
+void efa_rdm_ep_dump_rx_state(struct efa_rdm_ep *ep, const char *reason);
+
+void efa_rdm_ep_check_rx_stall(struct efa_rdm_ep *ep);
 
 int efa_rdm_ep_bulk_post_internal_rx_pkts(struct efa_rdm_ep *ep);
 
